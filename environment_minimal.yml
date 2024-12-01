@@ -1,0 +1,12 @@
+name: ams_560_bdata_venv
+channels:
+  - defaults
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - tensorflow
+  - ipykernel
+  - pandas
+  - holidays
+  - scikit-learn
+prefix: /home/bandham/miniconda3/envs/ams_560_bdata_venv
