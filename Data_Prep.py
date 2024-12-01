@@ -10,10 +10,10 @@ os.chdir('/content/drive/MyDrive/project_598/Akhil_Project')
 print(os.getcwd())"""
 
 # %%
-! pip install fredapi
-! pip install pandas_ta
-! pip install fastparquet
-! pip install pyarrow
+# ! pip install fredapi
+# ! pip install pandas_ta
+# ! pip install fastparquet
+# ! pip install pyarrow
 
 # %%
 from fredapi import Fred
@@ -318,9 +318,15 @@ y = np.concatenate(y_list, axis=0)
 print(f"Final shape of X: {X.shape}")
 print(f"Final shape of y: {y.shape}")
 
-# %%
-# Save the preprocessed data
-np.save('X_sequence_data.npy', X)
-np.save('y_sequence_data.npy', y)
+# %% [markdown]
+# ### Save the Preprocessed Data Using HDF5
 
-print("Preprocessed data has been saved.")
+# %%
+import h5py
+
+# Create an HDF5 file and save the datasets with compression
+with h5py.File('sequence_data.h5', 'w') as hf:
+    hf.create_dataset('X', data=X, compression="gzip")
+    hf.create_dataset('y', data=y, compression="gzip")
+
+print("Preprocessed data has been saved to 'sequence_data.h5'.")

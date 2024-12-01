@@ -7,14 +7,16 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import glob
+import h5py  # For reading HDF5 files
 
 # %% [markdown]
-# ## Load Preprocessed Data
+# ## Load Preprocessed Data from HDF5
 
 # %%
-# Load the preprocessed data
-X = np.load('X_sequence_data.npy')
-y = np.load('y_sequence_data.npy')
+# Open the HDF5 file and load the datasets
+with h5py.File('sequence_data.h5', 'r') as hf:
+    X = hf['X'][:]
+    y = hf['y'][:]
 
 print(f"Loaded X shape: {X.shape}")
 print(f"Loaded y shape: {y.shape}")
