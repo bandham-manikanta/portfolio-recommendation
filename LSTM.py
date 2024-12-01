@@ -1,39 +1,97 @@
 # %%
-import numpy as np
-import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
-from sklearn.model_selection import train_test_split
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import glob
-import h5py  # For reading HDF5 files
+import os
 
 # %% [markdown]
-# ## Load Preprocessed Data from HDF5
+# ## Constants and Parameters
 
 # %%
-# Open the HDF5 file and load the datasets
-with h5py.File('sequence_data.h5', 'r') as hf:
-    X = hf['X'][:]
-    y = hf['y'][:]
+sequence_length = 60  # Should match the value used in Part 1
+prediction_horizon = 5
+batch_size = 32
 
-print(f"Loaded X shape: {X.shape}")
-print(f"Loaded y shape: {y.shape}")
+# %% [markdown]
+# ## Function to Parse TFRecord Examples
 
 # %%
-# Split the data
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+def parse_tfrecord_fn(example_proto):
+    feature_description = {
+        'feature': tf.io.FixedLenFeature([], tf.string),
+        'label': tf.io.FixedLenFeature([], tf.string),
+    }
+    example = tf.io.parse_single_example(example_proto, feature_description)
+    
+    feature = tf.io.parse_tensor(example['feature'], out_type=tf.float32)
+    label = tf.io.parse_tensor(example['label'], out_type=tf.float32)
+    
+    # Set shapes for feature and label
+    feature.set_shape([sequence_length, -1])  # -1 for number of features
+    label.set_shape([prediction_horizon])
+    
+    return feature, label
 
-print(f"Training Data Shape: X_train: {X_train.shape}, y_train: {y_train.shape}")
-print(f"Testing Data Shape: X_test: {X_test.shape}, y_test: {y_test.shape}")
+# %% [markdown]
+# ## Create tf.data.Dataset from TFRecord Files
+
+# %%
+# Get the list of TFRecord files
+tfrecord_files = glob.glob('tfrecords_data/*.tfrecord')
+
+# Create a dataset from the list of TFRecord files
+raw_dataset = tf.data.TFRecordDataset(tfrecord_files, compression_type='GZIP')
+
+# Parse the serialized data in the TFRecord files
+parsed_dataset = raw_dataset.map(parse_tfrecord_fn, num_parallel_calls=tf.data.AUTOTUNE)
+
+# Determine the total dataset size
+total_dataset_size = sum(1 for _ in parsed_dataset)
+print(f"Total number of samples in dataset: {total_dataset_size}")
+
+# %% [markdown]
+# ## Split Dataset into Training and Testing Sets
+
+# %%
+# Shuffle and split the dataset
+train_size = int(0.8 * total_dataset_size)
+test_size = total_dataset_size - train_size
+
+# Shuffle the entire dataset and split
+parsed_dataset = parsed_dataset.shuffle(buffer_size=10000, reshuffle_each_iteration=False)
+
+train_dataset = parsed_dataset.take(train_size)
+test_dataset = parsed_dataset.skip(train_size)
+
+# Batch and prefetch the datasets
+train_dataset = train_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+test_dataset = test_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+print(f"Training samples: {train_size}, Testing samples: {test_size}")
+
+# %% [markdown]
+# ## Explore the Dataset
+
+# %%
+# Get input_shape and output_length from the dataset
+for features, labels in train_dataset.take(1):
+    print(f"Features shape: {features.shape}, Labels shape: {labels.shape}")
+    input_shape = features.shape[1:]  # Exclude batch dimension
+    output_length = labels.shape[1]
+    num_features = input_shape[1]
+    print(f"Input shape: {input_shape}, Output length: {output_length}, Number of features: {num_features}")
+    break
 
 # %% [markdown]
 # ## Build and Train the LSTM Model
 
 # %%
 # List available GPUs
-print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
+print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
 from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
 
@@ -59,22 +117,21 @@ def build_lstm_model(input_shape, output_length):
     return model
 
 # Initialize the model
-input_shape = (X_train.shape[1], X_train.shape[2])  # (sequence_length, num_features)
-output_length = y_train.shape[1]  # prediction_horizon (number of days to predict)
 model = build_lstm_model(input_shape, output_length)
 
 # %%
 # Train the model
 history = model.fit(
-    X_train, y_train,
+    train_dataset,
     epochs=20,
-    batch_size=32,
-    validation_split=0.2,
+    validation_data=test_dataset,
     verbose=1
 )
 
+# %% [markdown]
+# ## Plot Training & Validation Loss Values
+
 # %%
-# Plot training & validation loss values
 plt.figure(figsize=(10, 6))
 plt.plot(history.history['loss'], label='Train Loss')
 plt.plot(history.history['val_loss'], label='Validation Loss')
@@ -84,15 +141,36 @@ plt.ylabel('Loss')
 plt.legend()
 plt.show()
 
+# %% [markdown]
+# ## Evaluate the Model
+
 # %%
-# Evaluate the model
-test_loss, test_mae = model.evaluate(X_test, y_test, verbose=1)
+test_loss, test_mae = model.evaluate(test_dataset, verbose=1)
 print(f"LSTM Model - Test Loss: {test_loss:.4f}, Test MAE: {test_mae:.4f}")
 
-# Predict on test data
+# %% [markdown]
+# ## Predict on Test Data
+
+# %%
+# We need to collect the actual features and labels from the test_dataset for prediction
+X_test_list = []
+y_test_list = []
+
+for features, labels in test_dataset:
+    X_test_list.append(features.numpy())
+    y_test_list.append(labels.numpy())
+
+# Concatenate lists to form arrays
+X_test = np.concatenate(X_test_list, axis=0)
+y_test = np.concatenate(y_test_list, axis=0)
+
+# Make predictions
 y_pred = model.predict(X_test)
 
-# Visualize predictions for the first test sample
+# %% [markdown]
+# ## Visualize Predictions for First Test Sample
+
+# %%
 plt.figure(figsize=(10, 6))
 
 # Plot Actual Prices for the first test sample
@@ -107,15 +185,19 @@ plt.ylabel("Price")
 plt.legend()
 plt.show()
 
+# %% [markdown]
+# ## Save the Trained Model
+
 # %%
-# Save the trained model
 model.save('generalized_stock_lstm_model.h5')
 
 # %% [markdown]
 # ## Inference with New Data
 
+# %% [markdown]
+# ### Load Necessary Data for Inference
+
 # %%
-# Load necessary data for inference
 def load_company_data():
     all_dfs = {}
     parquet_files = glob.glob('df_*.parquet')
@@ -126,6 +208,9 @@ def load_company_data():
     return all_dfs
 
 all_dfs = load_company_data()
+
+# %% [markdown]
+# ### Prepare Inference Data Function
 
 # %%
 def prepare_inference_data(company_df, sequence_length=60):
@@ -140,16 +225,21 @@ def prepare_inference_data(company_df, sequence_length=60):
     """
     # Ensure data is sorted by date
     company_df = company_df.sort_index()
-
+    
     # Select relevant input features (exclude targets)
     input_features = company_df.filter(regex="^(?!.*target).*").values
-
+    
     # Take the last `sequence_length` days as input for prediction
     if len(input_features) >= sequence_length:
         input_sequence = input_features[-sequence_length:]
-        return np.expand_dims(input_sequence, axis=0)  # Add batch dimension
+        # Ensure the input sequence has the correct shape
+        input_sequence = np.expand_dims(input_sequence, axis=0)  # Add batch dimension
+        return input_sequence
     else:
         raise ValueError("Insufficient data for inference (less than sequence length).")
+
+# %% [markdown]
+# ### Get LSTM Predictions for a Company
 
 # %%
 def get_lstm_predictions_for_company(company_df, lstm_model, sequence_length=60):
@@ -174,8 +264,10 @@ def get_lstm_predictions_for_company(company_df, lstm_model, sequence_length=60)
         print(f"Skipping due to error: {e}")
         return None
 
+# %% [markdown]
+# ### Load the Trained LSTM Model
+
 # %%
-# Load the trained LSTM model
 lstm_model = load_model('generalized_stock_lstm_model.h5')
 
 # %% [markdown]
@@ -211,12 +303,12 @@ else:
 def get_lstm_predictions_for_all_companies(all_dfs, lstm_model, sequence_length=60):
     all_predictions = {}
     for company_key, company_df in all_dfs.items():
-        predictions = get_lstm_predictions_for_company(company_df, lstm_model, sequence_length=60)
+        print(f"Processing {company_key}...")
+        predictions = get_lstm_predictions_for_company(company_df, lstm_model, sequence_length=sequence_length)
         if predictions is not None:
             all_predictions[company_key] = predictions
-            print(f"Predictions for {company_key}:")
-            print("LSTM Predictions:", predictions)
-            print("-----------------------------")
+        else:
+            print(f"Predictions not available for {company_key}.")
     return all_predictions
 
 # %%
@@ -233,7 +325,7 @@ def predictions_to_dataframe(predictions_dict):
     for company_key, pred_values in predictions_dict.items():
         for day_ahead, value in enumerate(pred_values, start=1):
             records.append({
-                'Company': company_key,
+                'Company': company_key.replace('df_', ''),
                 'Day_Ahead': day_ahead,
                 'Predicted_Price': value
             })
