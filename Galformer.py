@@ -1,53 +1,122 @@
 # %%
-import numpy as np
-import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import Input, Dense, Dropout, Flatten, MultiHeadAttention, LayerNormalization, Add
-from sklearn.model_selection import train_test_split
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import glob
-import h5py  # For reading HDF5 files
+import os
 
 # %% [markdown]
-# ## Load Preprocessed Data from HDF5
+# ## Constants and Parameters
 
 # %%
-# Open the HDF5 file and load the datasets
-with h5py.File('sequence_data.h5', 'r') as hf:
-    X = hf['X'][:]
-    y = hf['y'][:]
+sequence_length = 60  # Should match the value used in Part 1
+prediction_horizon = 5
+batch_size = 32
 
-print(f"Loaded X shape: {X.shape}")
-print(f"Loaded y shape: {y.shape}")
+# %% [markdown]
+# ## Define Feature Description
 
 # %%
-# Split the data
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Define feature description
+feature_description = {
+    'feature': tf.io.FixedLenFeature([], tf.string),
+    'label': tf.io.FixedLenFeature([], tf.string),
+}
 
-print(f"Training Data Shape: X_train: {X_train.shape}, y_train: {y_train.shape}")
-print(f"Testing Data Shape: X_test: {X_test.shape}, y_test: {y_test.shape}")
+# %% [markdown]
+# ## Get the List of TFRecord Files
+
+# %%
+tfrecord_files = glob.glob('tfrecords_data/*.tfrecord')
+
+# Create a dataset from the list of TFRecord files
+raw_dataset = tf.data.TFRecordDataset(tfrecord_files, compression_type='GZIP')
+
+# %% [markdown]
+# ## Determine `num_features` from the Dataset
+
+# %%
+# Extract one example to determine num_features
+for raw_record in raw_dataset.take(1):
+    example = tf.io.parse_single_example(raw_record, feature_description)
+    feature = tf.io.parse_tensor(example['feature'], out_type=tf.float32)
+    label = tf.io.parse_tensor(example['label'], out_type=tf.float32)
+    sequence_length = feature.shape[0]
+    num_features = feature.shape[1]
+    prediction_horizon = label.shape[0]
+    print(f"Sequence Length: {sequence_length}, Num Features: {num_features}, Prediction Horizon: {prediction_horizon}")
+    break
+
+# %% [markdown]
+# ## Function to Parse TFRecord Examples
+
+# %%
+def parse_tfrecord_fn(example_proto):
+    example = tf.io.parse_single_example(example_proto, feature_description)
+    
+    feature = tf.io.parse_tensor(example['feature'], out_type=tf.float32)
+    label = tf.io.parse_tensor(example['label'], out_type=tf.float32)
+    
+    # Set shapes for feature and label
+    feature.set_shape([sequence_length, num_features])
+    label.set_shape([prediction_horizon])
+    
+    return feature, label
+
+# %% [markdown]
+# ## Create tf.data.Dataset from TFRecord Files
+
+# %%
+# Parse the serialized data in the TFRecord files
+parsed_dataset = raw_dataset.map(parse_tfrecord_fn, num_parallel_calls=tf.data.AUTOTUNE)
+
+# Determine the total dataset size
+total_dataset_size = sum(1 for _ in parsed_dataset)
+print(f"Total number of samples in dataset: {total_dataset_size}")
+
+# %% [markdown]
+# ## Split Dataset into Training and Testing Sets
+
+# %%
+# Shuffle and split the dataset
+train_size = int(0.8 * total_dataset_size)
+test_size = total_dataset_size - train_size
+
+# Shuffle the entire dataset and split
+parsed_dataset = parsed_dataset.shuffle(buffer_size=10000, reshuffle_each_iteration=False)
+
+train_dataset = parsed_dataset.take(train_size)
+test_dataset = parsed_dataset.skip(train_size)
+
+# Batch and prefetch the datasets
+train_dataset = train_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+test_dataset = test_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+print(f"Training samples: {train_size}, Testing samples: {test_size}")
 
 # %% [markdown]
 # ## Add Positional Encoding Function
 
 # %%
 def positional_encoding(sequence_length, d_model):
-    import numpy as np
-    position = np.arange(sequence_length)[:, np.newaxis]  # shape (seq_len, 1)
-    div_term = np.exp(np.arange(0, d_model, 2) * -(np.log(10000.0) / d_model))
-    pe = np.zeros((sequence_length, d_model))
-    pe[:, 0::2] = np.sin(position * div_term)
-    pe[:, 1::2] = np.cos(position * div_term)
-    pe = pe[np.newaxis, ...]
-    return tf.cast(pe, dtype=tf.float32)
+    position = tf.range(sequence_length, dtype=tf.float32)[:, tf.newaxis]
+    i = tf.range(d_model, dtype=tf.float32)[tf.newaxis, :]
+    angle_rates = 1 / tf.pow(10000.0, (2 * (i // 2)) / tf.cast(d_model, tf.float32))
+    angle_rads = position * angle_rates
+    sin_terms = tf.sin(angle_rads[:, 0::2])
+    cos_terms = tf.cos(angle_rads[:, 1::2])
+    pos_encoding = tf.concat([sin_terms, cos_terms], axis=-1)
+    return pos_encoding  # Shape: (sequence_length, d_model)
 
 # %% [markdown]
 # ## Build and Train the Galformer Model (Transformer-based Model)
 
 # %%
 # List available GPUs
-print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
+print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
 from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
 
@@ -58,15 +127,19 @@ for device in physical_devices:
     tf.config.experimental.set_memory_growth(device, True)
 
 # %%
-# Define the Galformer (Transformer) model
+# Initialize the Galformer model
+input_shape = (sequence_length, num_features)  # (sequence_length, num_features)
+output_length = prediction_horizon  # prediction_horizon
+
 def build_galformer_model(input_shape, output_length):
     inputs = Input(shape=input_shape)  # input_shape = (sequence_length, num_features)
     
     # Create positional encodings
     pe = positional_encoding(input_shape[0], input_shape[1])
+    pe = tf.expand_dims(pe, axis=0)  # Shape: (1, sequence_length, num_features)
     
     # Add positional encoding to inputs
-    x = Add()([inputs, pe])
+    x = inputs + pe  # Broadcasting, pe shape is (1, sequence_length, num_features)
     
     # Transformer Encoder Layer
     attn_output = MultiHeadAttention(num_heads=4, key_dim=input_shape[1])(x, x)
@@ -87,23 +160,21 @@ def build_galformer_model(input_shape, output_length):
     model.compile(optimizer='adam', loss='mse', metrics=['mae'])
     return model
 
-# Initialize the Galformer model
-input_shape = (X_train.shape[1], X_train.shape[2])  # (sequence_length, num_features)
-output_length = y_train.shape[1]  # prediction_horizon
 galformer_model = build_galformer_model(input_shape, output_length)
 
 # %%
 # Train the Galformer model
 history_galformer = galformer_model.fit(
-    X_train, y_train,
+    train_dataset,
     epochs=20,
-    batch_size=32,
-    validation_split=0.2,
+    validation_data=test_dataset,
     verbose=1
 )
 
+# %% [markdown]
+# ## Plot Training & Validation Loss Values
+
 # %%
-# Plot training & validation loss values
 plt.figure(figsize=(10, 6))
 plt.plot(history_galformer.history['loss'], label='Train Loss')
 plt.plot(history_galformer.history['val_loss'], label='Validation Loss')
@@ -113,13 +184,38 @@ plt.ylabel('Loss')
 plt.legend()
 plt.show()
 
+# %% [markdown]
+# ## Evaluate the Galformer Model
+
 # %%
-# Evaluate the Galformer model
-test_loss_galformer, test_mae_galformer = galformer_model.evaluate(X_test, y_test, verbose=1)
+test_loss_galformer, test_mae_galformer = galformer_model.evaluate(test_dataset, verbose=1)
 print(f"Galformer Model - Test Loss: {test_loss_galformer:.4f}, Test MAE: {test_mae_galformer:.4f}")
 
+# %% [markdown]
+# ## Predict on Test Data
+
+# %%
+# Collect features and labels from test_dataset
+X_test_list = []
+y_test_list = []
+
+for features, labels in test_dataset:
+    X_test_list.append(features.numpy())
+    y_test_list.append(labels.numpy())
+
+# Concatenate lists to form arrays
+X_test = np.concatenate(X_test_list, axis=0)
+y_test = np.concatenate(y_test_list, axis=0)
+
 # Predict on test data
-y_pred_galformer = galformer_model.predict(X_test)
+def add_positional_encoding(inputs):
+    pe = positional_encoding(inputs.shape[1], inputs.shape[2])
+    pe = tf.expand_dims(pe, axis=0)  # Shape: (1, sequence_length, num_features)
+    inputs_with_pe = inputs + pe.numpy()
+    return inputs_with_pe
+
+X_test_with_pe = add_positional_encoding(X_test)
+y_pred_galformer = galformer_model.predict(X_test_with_pe)
 
 # Visualize predictions for the first test sample
 plt.figure(figsize=(10, 6))
@@ -136,8 +232,10 @@ plt.ylabel("Price")
 plt.legend()
 plt.show()
 
+# %% [markdown]
+# ## Save the Galformer Model
+
 # %%
-# Save the Galformer model
 galformer_model.save('generalized_stock_galformer_model.h5')
 
 # %% [markdown]
@@ -176,7 +274,9 @@ def prepare_inference_data(company_df, sequence_length=60):
     # Take the last `sequence_length` days as input for prediction
     if len(input_features) >= sequence_length:
         input_sequence = input_features[-sequence_length:]
-        return np.expand_dims(input_sequence, axis=0)  # Add batch dimension
+        # Ensure the input sequence has the correct shape
+        input_sequence = np.expand_dims(input_sequence, axis=0)  # Add batch dimension
+        return input_sequence.astype(np.float32)  # Ensure data type consistency
     else:
         raise ValueError("Insufficient data for inference (less than sequence length).")
 
@@ -197,7 +297,8 @@ def get_galformer_predictions_for_company(company_df, galformer_model, sequence_
         input_data = prepare_inference_data(company_df, sequence_length=sequence_length)
         
         # Add positional encoding to inference data
-        pe = positional_encoding(input_shape[0], input_shape[1])
+        pe = positional_encoding(input_data.shape[1], input_data.shape[2])
+        pe = tf.expand_dims(pe, axis=0)  # Shape: (1, sequence_length, num_features)
         input_data_with_pe = input_data + pe.numpy()
         
         # Make predictions with Galformer
@@ -212,31 +313,6 @@ def get_galformer_predictions_for_company(company_df, galformer_model, sequence_
 galformer_model = load_model('generalized_stock_galformer_model.h5')
 
 # %% [markdown]
-# ### Example: Making Predictions for a Specific Company
-
-# %%
-# Choose a company
-company_key = 'df_AAPL'  # Example company
-if company_key in all_dfs:
-    company_df = all_dfs[company_key]
-    predictions = get_galformer_predictions_for_company(company_df, galformer_model, sequence_length=60)
-    
-    if predictions is not None:
-        # Visualize predictions
-        plt.figure(figsize=(10, 6))
-        
-        # Plot Galformer Predictions
-        plt.plot(range(1, len(predictions) + 1), predictions, marker='x', label='Predicted Prices (Galformer)')
-        
-        plt.title(f"Predicted Prices for {company_key} (Next {len(predictions)} Days)")
-        plt.xlabel("Days Ahead")
-        plt.ylabel("Price")
-        plt.legend()
-        plt.show()
-else:
-    print(f"No data available for {company_key}.")
-
-# %% [markdown]
 # ### Making Predictions for All Companies
 
 # %%
@@ -244,12 +320,12 @@ else:
 def get_galformer_predictions_for_all_companies(all_dfs, galformer_model, sequence_length=60):
     all_predictions = {}
     for company_key, company_df in all_dfs.items():
-        predictions = get_galformer_predictions_for_company(company_df, galformer_model, sequence_length=60)
+        print(f"Processing {company_key}...")
+        predictions = get_galformer_predictions_for_company(company_df, galformer_model, sequence_length=sequence_length)
         if predictions is not None:
             all_predictions[company_key] = predictions
-            print(f"Predictions for {company_key}:")
-            print("Galformer Predictions:", predictions)
-            print("-----------------------------")
+        else:
+            print(f"Predictions not available for {company_key}.")
     return all_predictions
 
 # %%
@@ -266,7 +342,7 @@ def predictions_to_dataframe(predictions_dict):
     for company_key, pred_values in predictions_dict.items():
         for day_ahead, value in enumerate(pred_values, start=1):
             records.append({
-                'Company': company_key,
+                'Company': company_key.replace('df_', ''),
                 'Day_Ahead': day_ahead,
                 'Predicted_Price': value
             })
