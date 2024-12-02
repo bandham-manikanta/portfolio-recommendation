@@ -27,7 +27,8 @@ import os
 # %%
 sequence_length = 60  # Should match the value used in data preparation
 prediction_horizon = 5
-batch_size = 256  # Increased batch size
+epochs = 10
+batch_size = 512  # Increased batch size
 print('Batch size:', batch_size)
 
 # %% [markdown]
@@ -214,7 +215,7 @@ callbacks = [early_stopping, lr_scheduler]
 # %%
 history_galformer = galformer_model.fit(
     train_dataset,
-    epochs=100,  # Increased epochs
+    epochs=epochs,  # Increased epochs
     validation_data=test_dataset,
     callbacks=callbacks,
     verbose=1
