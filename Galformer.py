@@ -1,7 +1,17 @@
+# %% [markdown]
+# # Galformer Model Training with TPU and CPU Support
+# 
+# This notebook trains a Transformer-based model (Galformer) for stock price prediction.
+# It is designed to run efficiently on both TPUs and CPUs, automatically detecting
+# the available hardware and adjusting accordingly.
+
+# %%
+# ! pip install --upgrade tensorflow==2.12
+
 # %%
 import tensorflow as tf
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, Dense, Dropout, Flatten, MultiHeadAttention, LayerNormalization, Add
+from tensorflow.keras.layers import Input, Dense, Dropout, Flatten, MultiHeadAttention, LayerNormalization
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -9,18 +19,56 @@ import glob
 import os
 
 # %% [markdown]
+# ## TPU Initialization
+
+# %%
+# Detect and initialize the TPU
+try:
+    # TPU detection
+    tpu = tf.distribute.cluster_resolver.TPUClusterResolver()  # TPU detection
+    print('Running on TPU:', tpu.master())
+except ValueError:
+    tpu = None
+    print('Not running on TPU')
+
+if tpu:
+    # Connect to the TPU cluster and initialize the system
+    tf.config.experimental_connect_to_cluster(tpu)
+    tf.tpu.experimental.initialize_tpu_system(tpu)
+    strategy = tf.distribute.TPUStrategy(tpu)
+else:
+    # Default strategy if TPU is not available
+    strategy = tf.distribute.get_strategy()
+
+print('Number of accelerators: ', strategy.num_replicas_in_sync)
+
+# %% [markdown]
 # ## Constants and Parameters
 
 # %%
-sequence_length = 60  # Should match the value used in Part 1
+sequence_length = 60  # Should match the value used in data preparation
 prediction_horizon = 5
-batch_size = 32
+per_replica_batch_size = 32
+global_batch_size = per_replica_batch_size * strategy.num_replicas_in_sync
+print('Global batch size:', global_batch_size)
+
+# %% [markdown]
+# ## Mount Google Drive (if using Google Colab)
+
+# %%
+# # If you're using Google Colab and storing data on Google Drive
+# from google.colab import drive
+# drive.mount('/content/drive')
+
+# # Change directory to where your TFRecord files are stored
+# os.chdir('/content/drive/MyDrive/')
+# print("Current Directory:", os.getcwd())
 
 # %% [markdown]
 # ## Define Feature Description
 
 # %%
-# Define feature description
+# Define feature description for parsing TFRecord files
 feature_description = {
     'feature': tf.io.FixedLenFeature([], tf.string),
     'label': tf.io.FixedLenFeature([], tf.string),
@@ -30,7 +78,9 @@ feature_description = {
 # ## Get the List of TFRecord Files
 
 # %%
+# List all TFRecord files
 tfrecord_files = glob.glob('tfrecords_data/*.tfrecord')
+print(f"Found {len(tfrecord_files)} TFRecord files.")
 
 # Create a dataset from the list of TFRecord files
 raw_dataset = tf.data.TFRecordDataset(tfrecord_files, compression_type='GZIP')
@@ -56,18 +106,18 @@ for raw_record in raw_dataset.take(1):
 # %%
 def parse_tfrecord_fn(example_proto):
     example = tf.io.parse_single_example(example_proto, feature_description)
-    
+
     feature = tf.io.parse_tensor(example['feature'], out_type=tf.float32)
     label = tf.io.parse_tensor(example['label'], out_type=tf.float32)
-    
+
     # Set shapes for feature and label
     feature.set_shape([sequence_length, num_features])
     label.set_shape([prediction_horizon])
-    
+
     return feature, label
 
 # %% [markdown]
-# ## Create tf.data.Dataset from TFRecord Files
+# ## Create `tf.data.Dataset` from TFRecord Files
 
 # %%
 # Parse the serialized data in the TFRecord files
@@ -76,6 +126,9 @@ parsed_dataset = raw_dataset.map(parse_tfrecord_fn, num_parallel_calls=tf.data.A
 # Determine the total dataset size
 total_dataset_size = sum(1 for _ in parsed_dataset)
 print(f"Total number of samples in dataset: {total_dataset_size}")
+
+# Reset the parsed_dataset iterator after counting
+parsed_dataset = raw_dataset.map(parse_tfrecord_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
 # %% [markdown]
 # ## Split Dataset into Training and Testing Sets
@@ -92,8 +145,8 @@ train_dataset = parsed_dataset.take(train_size)
 test_dataset = parsed_dataset.skip(train_size)
 
 # Batch and prefetch the datasets
-train_dataset = train_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-test_dataset = test_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+train_dataset = train_dataset.batch(global_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+test_dataset = test_dataset.batch(global_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
 print(f"Training samples: {train_size}, Testing samples: {test_size}")
 
@@ -112,19 +165,7 @@ def positional_encoding(sequence_length, d_model):
     return pos_encoding  # Shape: (sequence_length, d_model)
 
 # %% [markdown]
-# ## Build and Train the Galformer Model (Transformer-based Model)
-
-# %%
-# List available GPUs
-print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
-from tensorflow.python.client import device_lib
-print(device_lib.list_local_devices())
-
-# %%
-# Set memory growth for GPUs
-physical_devices = tf.config.list_physical_devices('GPU')
-for device in physical_devices:
-    tf.config.experimental.set_memory_growth(device, True)
+# ## Build and Compile the Galformer Model
 
 # %%
 # Initialize the Galformer model
@@ -133,14 +174,14 @@ output_length = prediction_horizon  # prediction_horizon
 
 def build_galformer_model(input_shape, output_length):
     inputs = Input(shape=input_shape)  # input_shape = (sequence_length, num_features)
-    
+
     # Create positional encodings
     pe = positional_encoding(input_shape[0], input_shape[1])
     pe = tf.expand_dims(pe, axis=0)  # Shape: (1, sequence_length, num_features)
-    
+
     # Add positional encoding to inputs
     x = inputs + pe  # Broadcasting, pe shape is (1, sequence_length, num_features)
-    
+
     # Transformer Encoder Layer
     attn_output = MultiHeadAttention(num_heads=4, key_dim=input_shape[1])(x, x)
     attn_output = Dropout(0.1)(attn_output)
@@ -160,13 +201,17 @@ def build_galformer_model(input_shape, output_length):
     model.compile(optimizer='adam', loss='mse', metrics=['mae'])
     return model
 
-galformer_model = build_galformer_model(input_shape, output_length)
+# Build and compile the model within the strategy scope
+with strategy.scope():
+    galformer_model = build_galformer_model(input_shape, output_length)
+
+# %% [markdown]
+# ## Train the Galformer Model
 
 # %%
-# Train the Galformer model
 history_galformer = galformer_model.fit(
     train_dataset,
-    epochs=20,
+    epochs=10,
     validation_data=test_dataset,
     verbose=1
 )
@@ -236,13 +281,16 @@ plt.show()
 # ## Save the Galformer Model
 
 # %%
-galformer_model.save('generalized_stock_galformer_model.h5')
+galformer_model.save('generalized_stock_galformer_model.keras')
+print("Galformer Model has been saved to 'generalized_stock_galformer_model.keras'.")
 
 # %% [markdown]
 # ## Inference with New Data
 
+# %% [markdown]
+# ### Load Company Data for Inference
+
 # %%
-# Load necessary data for inference
 def load_company_data():
     all_dfs = {}
     parquet_files = glob.glob('df_*.parquet')
@@ -253,6 +301,9 @@ def load_company_data():
     return all_dfs
 
 all_dfs = load_company_data()
+
+# %% [markdown]
+# ### Prepare Data for Inference
 
 # %%
 def prepare_inference_data(company_df, sequence_length=60):
@@ -280,6 +331,9 @@ def prepare_inference_data(company_df, sequence_length=60):
     else:
         raise ValueError("Insufficient data for inference (less than sequence length).")
 
+# %% [markdown]
+# ### Make Predictions for Each Company
+
 # %%
 def get_galformer_predictions_for_company(company_df, galformer_model, sequence_length=60):
     """
@@ -295,12 +349,12 @@ def get_galformer_predictions_for_company(company_df, galformer_model, sequence_
     try:
         # Prepare data for inference
         input_data = prepare_inference_data(company_df, sequence_length=sequence_length)
-        
+
         # Add positional encoding to inference data
         pe = positional_encoding(input_data.shape[1], input_data.shape[2])
         pe = tf.expand_dims(pe, axis=0)  # Shape: (1, sequence_length, num_features)
         input_data_with_pe = input_data + pe.numpy()
-        
+
         # Make predictions with Galformer
         pred_galformer = galformer_model.predict(input_data_with_pe)
         return pred_galformer.flatten()
@@ -308,16 +362,21 @@ def get_galformer_predictions_for_company(company_df, galformer_model, sequence_
         print(f"Skipping due to error: {e}")
         return None
 
+# %% [markdown]
+# ### Load the Trained Model
+
 # %%
 # Load the trained Galformer model
-galformer_model = load_model('generalized_stock_galformer_model.h5')
+galformer_model = tf.keras.models.load_model('generalized_stock_galformer_model.keras')
 
 # %% [markdown]
-# ### Making Predictions for All Companies
+# ### Make Predictions for All Companies
 
 # %%
-# Function to get predictions for all companies
 def get_galformer_predictions_for_all_companies(all_dfs, galformer_model, sequence_length=60):
+    """
+    Get Galformer predictions for all companies.
+    """
     all_predictions = {}
     for company_key, company_df in all_dfs.items():
         print(f"Processing {company_key}...")
@@ -333,11 +392,13 @@ def get_galformer_predictions_for_all_companies(all_dfs, galformer_model, sequen
 all_company_predictions = get_galformer_predictions_for_all_companies(all_dfs, galformer_model, sequence_length=60)
 
 # %% [markdown]
-# ### Saving Predictions
+# ### Save Predictions
 
 # %%
-# Convert predictions to DataFrame for further analysis or saving
 def predictions_to_dataframe(predictions_dict):
+    """
+    Convert predictions dictionary to a DataFrame.
+    """
     records = []
     for company_key, pred_values in predictions_dict.items():
         for day_ahead, value in enumerate(pred_values, start=1):
@@ -355,3 +416,5 @@ predictions_df.head()
 # Save the predictions DataFrame to a CSV file
 predictions_df.to_csv('galformer_stock_price_predictions.csv', index=False)
 print("Galformer Predictions have been saved to 'galformer_stock_price_predictions.csv'.")
+
+
