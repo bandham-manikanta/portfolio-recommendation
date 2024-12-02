@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Enhanced LSTM Model Training and Inference
+# # Updated LSTM Model Training and Inference
 
 # %%
 import tensorflow as tf
@@ -12,61 +12,88 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import glob
 import os
+from datetime import datetime, timedelta
+import yfinance as yf
 
 # %% [markdown]
 # ## Constants and Parameters
 
 # %%
-sequence_length = 60  # Sequence length matching the data preparation
+sequence_length = 60     # Sequence length matching the data preparation
 prediction_horizon = 25  # Matching Galformer prediction horizon
-batch_size = 512  # Matching Galformer batch size
-epochs = 1  # Increased epochs for better training
+batch_size = 512         # Matching Galformer batch size
+epochs = 15              # Number of training epochs matching Galformer
 print('Batch size:', batch_size)
 
 # %% [markdown]
-# ## Function to Parse and Normalize TFRecord Examples
+# ## Define Feature Description
 
 # %%
-def parse_tfrecord_fn(example_proto):
-    feature_description = {
-        'feature': tf.io.FixedLenFeature([], tf.string),
-        'label': tf.io.FixedLenFeature([], tf.string),
-    }
-    example = tf.io.parse_single_example(example_proto, feature_description)
-    
-    feature = tf.io.parse_tensor(example['feature'], out_type=tf.float32)
-    label = tf.io.parse_tensor(example['label'], out_type=tf.float32)
-    
-    # Set shapes for feature and label
-    feature.set_shape([sequence_length, None])  # None for number of features
-    label.set_shape([prediction_horizon])
-    
-    # Normalize features (z-score standardization)
-    feature_mean = tf.reduce_mean(feature, axis=0, keepdims=True)
-    feature_std = tf.math.reduce_std(feature, axis=0, keepdims=True) + 1e-6
-    feature = (feature - feature_mean) / feature_std
-    
-    # Normalize labels (z-score standardization)
-    label_mean = tf.reduce_mean(label)
-    label_std = tf.math.reduce_std(label) + 1e-6
-    label = (label - label_mean) / label_std
-    
-    # Store label mean and std for inverse transformation
-    label_info = tf.stack([label_mean, label_std])
-    
-    return feature, (label, label_info)
+# Define feature description for parsing TFRecord files
+feature_description = {
+    'feature': tf.io.FixedLenFeature([], tf.string),
+    'label': tf.io.FixedLenFeature([], tf.string),
+}
 
 # %% [markdown]
-# ## Create `tf.data.Dataset` from TFRecord Files
+# ## Get the List of TFRecord Files
 
 # %%
-# Get the list of TFRecord files
+# List all TFRecord files
 tfrecord_files = glob.glob('tfrecords_data/*.tfrecord')
 print(f"Found {len(tfrecord_files)} TFRecord files.")
 
 # Create a dataset from the list of TFRecord files
 raw_dataset = tf.data.TFRecordDataset(tfrecord_files, compression_type='GZIP')
 
+# %% [markdown]
+# ## Determine `num_features` from the Dataset
+
+# %%
+# Extract one example to determine num_features
+for raw_record in raw_dataset.take(1):
+    example = tf.io.parse_single_example(raw_record, feature_description)
+    feature = tf.io.parse_tensor(example['feature'], out_type=tf.float32)
+    label = tf.io.parse_tensor(example['label'], out_type=tf.float32)
+    sequence_length = feature.shape[0]
+    num_features = feature.shape[1]
+    prediction_horizon = label.shape[0]
+    print(f"Sequence Length: {sequence_length}, Num Features: {num_features}, Prediction Horizon: {prediction_horizon}")
+    break
+
+# %% [markdown]
+# ## Function to Parse and Normalize TFRecord Examples
+
+# %%
+def parse_tfrecord_fn(example_proto):
+    example = tf.io.parse_single_example(example_proto, feature_description)
+
+    feature = tf.io.parse_tensor(example['feature'], out_type=tf.float32)
+    label = tf.io.parse_tensor(example['label'], out_type=tf.float32)
+
+    # Set shapes for feature and label
+    feature.set_shape([sequence_length, num_features])
+    label.set_shape([prediction_horizon])
+
+    # Normalize features (z-score standardization)
+    feature_mean = tf.reduce_mean(feature, axis=0, keepdims=True)
+    feature_std = tf.math.reduce_std(feature, axis=0, keepdims=True) + 1e-6  # Add epsilon to avoid division by zero
+    feature = (feature - feature_mean) / feature_std
+
+    # Normalize labels (z-score standardization)
+    label_mean = tf.reduce_mean(label)
+    label_std = tf.math.reduce_std(label) + 1e-6
+    label = (label - label_mean) / label_std
+
+    # Store label mean and std for inverse transformation (if needed)
+    label_info = tf.stack([label_mean, label_std])  # Shape: (2,)
+
+    return feature, (label, label_info)
+
+# %% [markdown]
+# ## Create `tf.data.Dataset` from TFRecord Files
+
+# %%
 # Parse the serialized data in the TFRecord files
 parsed_dataset = raw_dataset.map(parse_tfrecord_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
@@ -131,14 +158,14 @@ def build_enhanced_lstm_model(input_shape, output_length):
         Dropout(0.3),
         Dense(output_length, activation='linear')
     ])
-    
+
     # Define learning rate schedule
     lr_schedule = ExponentialDecay(
-        initial_learning_rate=1e-3,
+        initial_learning_rate=1e-4,  # Matching Galformer learning rate
         decay_steps=10000,
         decay_rate=0.9)
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-    
+
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
     return model
 
@@ -252,82 +279,78 @@ print("Enhanced LSTM Model has been saved to 'enhanced_stock_lstm_model.keras'."
 # ## Inference with New Data
 
 # %% [markdown]
-# ### Load Necessary Data for Inference
-
-# %%
-def load_company_data():
-    all_dfs = {}
-    parquet_files = glob.glob('df_*.parquet')
-    for file in parquet_files:
-        key = os.path.splitext(os.path.basename(file))[0]  # e.g., 'df_AAPL'
-        df = pd.read_parquet(file)
-        all_dfs[key] = df
-    return all_dfs
-
-all_dfs = load_company_data()
-
-# %% [markdown]
 # ### Prepare Inference Data Function
 
 # %%
-def prepare_inference_data(company_df, sequence_length=60):
+def prepare_inference_data(data, sequence_length=60):
     """
     Prepare input data for inference for a single company.
     Args:
-        company_df (DataFrame): The DataFrame for a specific company.
+        data (DataFrame): The DataFrame containing historical stock data.
         sequence_length (int): The number of past days to consider as input.
 
     Returns:
         numpy array: The input data ready for prediction.
     """
-    # Ensure data is sorted by date
-    company_df = company_df.sort_index()
-    
-    # Select relevant input features (exclude targets)
-    input_features = company_df.filter(regex="^(?!.*target).*").values
-    
-    # Take the last `sequence_length` days as input for prediction
-    if len(input_features) >= sequence_length:
-        input_sequence = input_features[-sequence_length:]
-        # Normalize features using the same method as during training
-        feature_mean = np.mean(input_sequence, axis=0, keepdims=True)
-        feature_std = np.std(input_sequence, axis=0, keepdims=True) + 1e-6
-        input_sequence = (input_sequence - feature_mean) / feature_std
-        # Ensure the input sequence has the correct shape
-        input_sequence = np.expand_dims(input_sequence, axis=0)  # Add batch dimension
-        return input_sequence.astype(np.float32), feature_mean, feature_std
-    else:
-        print(f"Insufficient data for inference (less than sequence length) for company.")
-        return None, None, None
+    required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+
+    # Check if required columns are present
+    if not all(col in data.columns for col in required_columns):
+        print(f"Some required columns are missing. Needed: {required_columns}")
+        return None
+
+    if len(data) < sequence_length:
+        print(f"Not enough data to create input sequence.")
+        return None
+
+    # Prepare input features
+    input_features = data[required_columns].values.astype(np.float32)
+
+    # Take the last `sequence_length` days as input
+    input_sequence = input_features[-sequence_length:]
+
+    # Normalize features (z-score standardization)
+    mean = np.mean(input_sequence, axis=0, keepdims=True)
+    std = np.std(input_sequence, axis=0, keepdims=True) + 1e-6  # To avoid division by zero
+    normalized_sequence = (input_sequence - mean) / std
+
+    # Reshape to match model input
+    input_sequence = normalized_sequence.reshape(1, sequence_length, -1)
+    return input_sequence
 
 # %% [markdown]
 # ### Get Enhanced LSTM Predictions for a Company
 
 # %%
-def get_enhanced_lstm_predictions_for_company(company_df, lstm_model, sequence_length=60):
+def get_enhanced_lstm_predictions_for_company(data, lstm_model, sequence_length=60):
     """
     Get Enhanced LSTM predictions for a single company using the trained model.
     Args:
-        company_df (DataFrame): DataFrame of the company.
+        data (DataFrame): The DataFrame containing historical stock data.
         lstm_model: Trained Enhanced LSTM model.
         sequence_length (int): Number of past days to consider as input.
 
     Returns:
-        numpy array: Predicted prices (standardized).
+        numpy array: Predicted prices.
     """
     try:
         # Prepare data for inference
-        input_data, _, _ = prepare_inference_data(company_df, sequence_length=sequence_length)
+        input_data = prepare_inference_data(data, sequence_length=sequence_length)
         if input_data is None:
             return None
-        
+
         # Make predictions with Enhanced LSTM
         pred_lstm = lstm_model.predict(input_data)
-        # Note: Since labels were normalized per sample during training, and during inference we don't have label mean and std,
-        # the predictions are in standardized form and cannot be directly denormalized.
-        return pred_lstm.flatten()
-    except ValueError as e:
-        print(f"Skipping due to error: {e}")
+
+        # Denormalize predictions
+        recent_close_prices = data['Close'].values[-prediction_horizon:]
+        label_mean = np.mean(recent_close_prices)
+        label_std = np.std(recent_close_prices) + 1e-6
+        pred_lstm_denorm = pred_lstm * label_std + label_mean
+
+        return pred_lstm_denorm.flatten()
+    except Exception as e:
+        print(f"Error making LSTM predictions for the company: {e}")
         return None
 
 # %% [markdown]
@@ -337,24 +360,25 @@ def get_enhanced_lstm_predictions_for_company(company_df, lstm_model, sequence_l
 lstm_model = tf.keras.models.load_model('enhanced_stock_lstm_model.keras')
 
 # %% [markdown]
-# ### Making Predictions for All Companies
+# ### Making Predictions for Multiple Companies
 
 # %%
-# Function to get predictions for all companies
-def get_enhanced_lstm_predictions_for_all_companies(all_dfs, lstm_model, sequence_length=60):
-    all_predictions = {}
-    for company_key, company_df in all_dfs.items():
-        print(f"Processing {company_key}...")
-        predictions = get_enhanced_lstm_predictions_for_company(company_df, lstm_model, sequence_length=sequence_length)
-        if predictions is not None:
-            all_predictions[company_key] = predictions
-        else:
-            print(f"Predictions not available for {company_key}.")
-    return all_predictions
+tickers = ['AAPL', 'MSFT', 'GOOGL']  # List of tickers
+all_predictions = {}
 
-# %%
-# Get predictions for all companies
-all_company_predictions = get_enhanced_lstm_predictions_for_all_companies(all_dfs, lstm_model, sequence_length=60)
+for ticker in tickers:
+    print(f"Processing {ticker}...")
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=730)  # Increased data period for better prediction
+    data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+    if data.empty:
+        print(f"No data available for {ticker}.")
+        continue
+    predictions = get_enhanced_lstm_predictions_for_company(data, lstm_model, sequence_length=60)
+    if predictions is not None:
+        all_predictions[ticker] = predictions
+    else:
+        print(f"Predictions not available for {ticker}.")
 
 # %% [markdown]
 # ### Saving Predictions
@@ -363,16 +387,16 @@ all_company_predictions = get_enhanced_lstm_predictions_for_all_companies(all_df
 # Convert predictions to DataFrame for further analysis or saving
 def predictions_to_dataframe(predictions_dict):
     records = []
-    for company_key, pred_values in predictions_dict.items():
+    for ticker, pred_values in predictions_dict.items():
         for day_ahead, value in enumerate(pred_values, start=1):
             records.append({
-                'Company': company_key.replace('df_', ''),
+                'Ticker': ticker,
                 'Day_Ahead': day_ahead,
-                'Predicted_Price_Standardized': value  # Note: Standardized predictions
+                'Predicted_Price': value
             })
     return pd.DataFrame(records)
 
-predictions_df = predictions_to_dataframe(all_company_predictions)
+predictions_df = predictions_to_dataframe(all_predictions)
 predictions_df.head()
 
 # %%

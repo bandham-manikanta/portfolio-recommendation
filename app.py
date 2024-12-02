@@ -10,10 +10,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
-from sklearn.preprocessing import MinMaxScaler
 import random
 import re
-import time
 import urllib.parse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -39,10 +37,10 @@ tf.random.set_seed(42)
 st.set_page_config(page_title="Stock Analysis Dashboard", layout="wide")
 
 # Define prediction horizon and sequence length
-prediction_horizon = 5  # Number of days ahead to predict
-sequence_length = 60    # Sequence length expected by the Galformer model
+prediction_horizon = 25  # Number of days ahead to predict (updated to match models)
+sequence_length = 60    # Sequence length expected by the models
 
-# Ticker to company name mapping
+# Ticker to company name mapping (same as before)
 ticker_to_company_name = {
     "AAPL": "Apple Inc.",
     "NVDA": "NVIDIA Corporation",
@@ -98,32 +96,65 @@ def fetch_historical_data(ticker, start_date, end_date):
         st.warning(f"No historical data available for {ticker}.")
     return data
 
-# Prepare input sequence function
+# Prepare input sequence function (updated normalization)
 def prepare_input_sequence(data, sequence_length, ticker):
     if 'Close' not in data.columns or len(data) < sequence_length:
         st.warning(f"Not enough data to create input sequence for {ticker}.")
-        return None, None
-    close_prices = data['Close'].values.reshape(-1, 1)
-    scaler = MinMaxScaler()
-    scaled_prices = scaler.fit_transform(close_prices)
-    input_sequence = scaled_prices[-sequence_length:]
-    input_sequence = input_sequence.reshape(1, sequence_length, -1)
-    return input_sequence, scaler
+        return None
+    close_prices = data['Close'].values.astype(np.float32)
 
-# Galformer predictions function
+    # Prepare input features (for one feature 'Close')
+    input_sequence = close_prices[-sequence_length:]
+
+    # Normalize features (z-score standardization)
+    mean = np.mean(input_sequence)
+    std = np.std(input_sequence) + 1e-6  # To avoid division by zero
+    normalized_sequence = (input_sequence - mean) / std
+
+    # Reshape to match model input
+    input_sequence = normalized_sequence.reshape(1, sequence_length, 1)
+    return input_sequence
+
+# Galformer predictions function (updated to match training preprocessing)
 def galformer_predictions(ticker, sequence_length, model):
     end_date = datetime.today()
     start_date = end_date - timedelta(days=365)
     data = fetch_historical_data(ticker, start_date, end_date)
-    input_sequence, scaler = prepare_input_sequence(data, sequence_length, ticker)
+    input_sequence = prepare_input_sequence(data, sequence_length, ticker)
+    if input_sequence is not None:
+        try:
+            # For Galformer, add positional encoding if needed
+            # Assuming the model includes positional encoding internally
+            predictions = model.predict(input_sequence)
+            # Denormalize predictions
+            mean = np.mean(data['Close'].values[-prediction_horizon:])
+            std = np.std(data['Close'].values[-prediction_horizon:]) + 1e-6
+            predictions = predictions * std + mean
+            return predictions.flatten()[:prediction_horizon]  # Return predictions for the prediction horizon
+        except Exception as e:
+            st.error(f"Error making Galformer predictions for {ticker}: {e}")
+            logging.error(f"Error making Galformer predictions for {ticker}: {e}")
+            return None
+    else:
+        return None
+
+# LSTM predictions function (similar to Galformer)
+def lstm_predictions(ticker, sequence_length, model):
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=365)
+    data = fetch_historical_data(ticker, start_date, end_date)
+    input_sequence = prepare_input_sequence(data, sequence_length, ticker)
     if input_sequence is not None:
         try:
             predictions = model.predict(input_sequence)
-            predictions = scaler.inverse_transform(predictions).flatten()
-            return predictions[:prediction_horizon]  # Return predictions for the prediction horizon
+            # Denormalize predictions
+            mean = np.mean(data['Close'].values[-prediction_horizon:])
+            std = np.std(data['Close'].values[-prediction_horizon:]) + 1e-6
+            predictions = predictions * std + mean
+            return predictions.flatten()[:prediction_horizon]
         except Exception as e:
-            st.error(f"Error making predictions for {ticker}: {e}")
-            logging.error(f"Error making predictions for {ticker}: {e}")
+            st.error(f"Error making LSTM predictions for {ticker}: {e}")
+            logging.error(f"Error making LSTM predictions for {ticker}: {e}")
             return None
     else:
         return None
@@ -338,7 +369,6 @@ def fetch_news(tickers, max_articles):
 
 # Plot predictions function
 def plot_predictions(ticker, current_price, lstm_pred, galformer_pred):
-    # Same as before
     end_date = datetime.today()
     start_date = end_date - timedelta(days=90)
     historical_data = fetch_historical_data(ticker, start_date, end_date)
@@ -354,7 +384,13 @@ def plot_predictions(ticker, current_price, lstm_pred, galformer_pred):
 
     # Create future dates
     last_date = historical_prices['Date'].iloc[-1]
-    future_dates = [last_date + timedelta(days=i) for i in range(1, prediction_horizon + 1)]
+    future_dates = []
+    delta = 1
+    while len(future_dates) < prediction_horizon:
+        next_date = last_date + timedelta(days=delta)
+        if next_date.weekday() < 5:  # Skip weekends
+            future_dates.append(next_date)
+        delta += 1
 
     # Prepare DataFrames for predictions
     df_lstm = pd.DataFrame({
@@ -408,7 +444,6 @@ def plot_predictions(ticker, current_price, lstm_pred, galformer_pred):
 
 # Plot sentiment function
 def plot_sentiment(sentiment_score, key):
-    # Same as before
     fig = go.Figure(
         go.Indicator(
             mode="gauge+number",
@@ -424,7 +459,6 @@ def plot_sentiment(sentiment_score, key):
 
 # Display results in tabs function
 def display_results_in_tabs(company):
-    # Same as before
     st.subheader(f"{company['Ticker']} - ${company['Current Price']:.2f}")
     st.metric(label="Sentiment Score", value=round(company['Sentiment Score'], 2))
 
@@ -576,11 +610,31 @@ def load_galformer_model():
 
     try:
         model = tf.keras.models.load_model(model_path)
-        model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+        # No need to compile model if it's already compiled
         return model
     except Exception as e:
         st.error(f"Error loading Galformer model: {e}")
         logging.error(f"Error loading Galformer model: {e}")
+        return None
+
+# Load LSTM model function
+@st.cache_resource
+def load_lstm_model():
+    model_path = 'enhanced_stock_lstm_model.keras'
+    if not os.path.exists(model_path):
+        st.error(
+            f"LSTM model file not found at '{model_path}'. Please ensure the model file is available."
+        )
+        logging.error(f"LSTM model file not found at '{model_path}'.")
+        return None
+
+    try:
+        model = tf.keras.models.load_model(model_path)
+        # No need to compile model if it's already compiled
+        return model
+    except Exception as e:
+        st.error(f"Error loading LSTM model: {e}")
+        logging.error(f"Error loading LSTM model: {e}")
         return None
 
 @st.cache_data(ttl=3600)
@@ -601,8 +655,8 @@ def fetch_current_prices(tickers):
             current_prices[ticker] = np.nan  # Use NaN for missing data
     return current_prices
 
-# Function to process each ticker (for parallel processing)
-def process_ticker(ticker, current_price, articles, max_articles, sequence_length, prediction_horizon, sentiment_classifier, summarizer, summarizer_tokenizer, text_generator, galformer_model):
+# Function to process each ticker (updated to use LSTM model)
+def process_ticker(ticker, current_price, articles, max_articles, sequence_length, prediction_horizon, sentiment_classifier, summarizer, summarizer_tokenizer, text_generator, galformer_model, lstm_model):
     logging.info(f"Processing ticker {ticker}")
     company_info = {}
     try:
@@ -619,13 +673,13 @@ def process_ticker(ticker, current_price, articles, max_articles, sequence_lengt
             return None
         galformer_pred = np.round(galformer_pred, 2)
 
-        # Mock LSTM predictions (replace with actual LSTM predictions if available)
-        lstm_pred = np.round(
-            np.random.normal(
-                loc=current_price, scale=current_price * 0.02, size=prediction_horizon
-            ),
-            2,
-        )
+        # Get LSTM predictions
+        lstm_pred = lstm_predictions(ticker, sequence_length, lstm_model)
+        if lstm_pred is None:
+            st.warning(f"Skipping {ticker} due to insufficient data for LSTM predictions.")
+            logging.warning(f"Skipping {ticker} due to insufficient data for LSTM predictions.")
+            return None
+        lstm_pred = np.round(lstm_pred, 2)
 
         # Use the pre-fetched articles
         if not articles:
@@ -687,7 +741,8 @@ if st.sidebar.button("Run Analysis"):
     with st.spinner("Loading models..."):
         sentiment_classifier, summarizer, summarizer_tokenizer, text_generator = load_models()
         galformer_model = load_galformer_model()
-        if galformer_model is None:
+        lstm_model = load_lstm_model()
+        if galformer_model is None or lstm_model is None:
             st.stop()
 
     with st.spinner("Fetching current stock prices..."):
@@ -717,7 +772,8 @@ if st.sidebar.button("Run Analysis"):
                 summarizer,
                 summarizer_tokenizer,
                 text_generator,
-                galformer_model
+                galformer_model,
+                lstm_model  # Pass the LSTM model
             ): ticker for ticker in selected_tickers
         }
 
@@ -747,7 +803,7 @@ if st.sidebar.button("Run Analysis"):
     prediction_records = []
 
     for company in combined_data:
-        for i in range(prediction_horizon):
+        for i in range(len(company['Galformer Prediction'])):
             record = {
                 'Ticker': company['Ticker'],
                 'Current Price': company['Current Price'],
