@@ -282,7 +282,7 @@ def plot_predictions(ticker, current_price, lstm_pred, galformer_pred):
     st.plotly_chart(fig, use_container_width=True)
 
 # Plot sentiment function
-def plot_sentiment(sentiment_score):
+def plot_sentiment(sentiment_score, key):
     fig = go.Figure(
         go.Indicator(
             mode="gauge+number",
@@ -294,7 +294,7 @@ def plot_sentiment(sentiment_score):
             },
         )
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=key)
 
 # Display results in tabs function
 def display_results_in_tabs(company):
@@ -317,7 +317,7 @@ def display_results_in_tabs(company):
 
     with tabs[1]:
         st.markdown("#### Sentiment Score")
-        plot_sentiment(company['Sentiment Score'])
+        plot_sentiment(company['Sentiment Score'], key=f"sentiment-{company['Ticker']}")
         st.markdown("#### News Summary")
         with st.expander("Show News Summary"):
             st.write(company['Summary'])
@@ -333,7 +333,7 @@ def display_results_in_tabs(company):
             # Plot sentiment over time
             fig = px.line(daily_sentiment, x='Date', y='Sentiment Score',
                           title='Sentiment Over Time', markers=True)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"sentiment-over-time-{company['Ticker']}")
 
             # Fetch historical stock prices matching sentiment dates
             start_date = daily_sentiment['Date'].min()
@@ -353,9 +353,6 @@ def display_results_in_tabs(company):
                 on='Date',
                 how='inner'
             )
-
-            # Check and print column names for debugging
-            st.write("Merged DataFrame columns:", merged_df.columns)
 
             if merged_df.empty:
                 st.write("No overlapping dates between sentiment data and stock prices.")
@@ -395,9 +392,10 @@ def display_results_in_tabs(company):
             fig.update_yaxes(title_text="Sentiment Score", secondary_y=False)
             fig.update_yaxes(title_text="Stock Price", secondary_y=True)
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"stock-price-{company['Ticker']}")
         else:
             st.write("No sentiment data available for this company.")
+
 
 @st.cache_resource
 def load_models():
@@ -507,7 +505,7 @@ all_tickers = [
 ]
 
 selected_tickers = st.sidebar.multiselect(
-    "Select Tickers", options=all_tickers, default=["AAPL", "GOOGL", "MSFT"]
+    "Select Tickers", options=all_tickers, default=["AAPL", "GOOGL", "MSFT", "VZ"]
 )
 
 # Number of articles
