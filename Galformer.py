@@ -1,6 +1,6 @@
 # %% [markdown]
 # # Updated Galformer Model Training on CPU
-# 
+#
 # This notebook trains an improved Transformer-based model (Galformer) for stock price prediction.
 # The improvements include data normalization, model architecture enhancements, and training optimizations.
 
@@ -14,6 +14,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, Dropout, Flatten, MultiHeadAttention, LayerNormalization
 from tensorflow.keras.callbacks import LearningRateScheduler, EarlyStopping
 from tensorflow.keras.optimizers.schedules import ExponentialDecay
+from tensorflow.keras import regularizers
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -26,7 +27,7 @@ import os
 # %%
 sequence_length = 60  # Should match the value used in data preparation
 prediction_horizon = 5
-batch_size = 32
+batch_size = 128  # Increased batch size
 print('Batch size:', batch_size)
 
 # %% [markdown]
@@ -84,7 +85,15 @@ def parse_tfrecord_fn(example_proto):
     feature_std = tf.math.reduce_std(feature, axis=0, keepdims=True) + 1e-6  # Add epsilon to avoid division by zero
     feature = (feature - feature_mean) / feature_std
 
-    return feature, label
+    # Normalize labels (z-score standardization)
+    label_mean = tf.reduce_mean(label, keepdims=True)
+    label_std = tf.math.reduce_std(label, keepdims=True) + 1e-6
+    label = (label - label_mean) / label_std
+
+    # Store label mean and std for inverse transformation (if needed)
+    label_info = tf.stack([label_mean, label_std], axis=0)
+
+    return feature, (label, label_info)
 
 # %% [markdown]
 # ## Create `tf.data.Dataset` from TFRecord Files
@@ -142,7 +151,7 @@ def positional_encoding(sequence_length, d_model):
 input_shape = (sequence_length, num_features)  # (sequence_length, num_features)
 output_length = prediction_horizon  # prediction_horizon
 
-def build_galformer_model(input_shape, output_length, num_layers=2, dff=256, num_heads=8):
+def build_galformer_model(input_shape, output_length, num_layers=3, dff=512, num_heads=8):
     inputs = Input(shape=input_shape)  # input_shape = (sequence_length, num_features)
 
     # Create positional encodings
@@ -156,13 +165,13 @@ def build_galformer_model(input_shape, output_length, num_layers=2, dff=256, num
     for _ in range(num_layers):
         # Multi-Head Attention
         attn_output = MultiHeadAttention(num_heads=num_heads, key_dim=input_shape[1], dropout=0.1)(x, x)
-        attn_output = Dropout(0.1)(attn_output)
+        attn_output = Dropout(0.2)(attn_output)  # Increased dropout
         out1 = LayerNormalization(epsilon=1e-6)(attn_output + x)
 
-        # Feed Forward Network
-        ffn_output = Dense(dff, activation='relu')(out1)
-        ffn_output = Dense(input_shape[1])(ffn_output)
-        ffn_output = Dropout(0.1)(ffn_output)
+        # Feed Forward Network with L2 Regularization
+        ffn_output = Dense(dff, activation='relu', kernel_regularizer=regularizers.l2(1e-4))(out1)
+        ffn_output = Dense(input_shape[1], kernel_regularizer=regularizers.l2(1e-4))(ffn_output)
+        ffn_output = Dropout(0.2)(ffn_output)  # Increased dropout
         x = LayerNormalization(epsilon=1e-6)(ffn_output + out1)
 
     # Flatten and Output Layer
@@ -172,7 +181,7 @@ def build_galformer_model(input_shape, output_length, num_layers=2, dff=256, num
     model = Model(inputs=inputs, outputs=outputs)
     # Define learning rate schedule
     lr_schedule = ExponentialDecay(
-        initial_learning_rate=1e-3,
+        initial_learning_rate=1e-4,  # Reduced learning rate
         decay_steps=10000,
         decay_rate=0.9)
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
@@ -185,8 +194,8 @@ galformer_model = build_galformer_model(input_shape, output_length)
 # ## Training Callbacks
 
 # %%
-# Early stopping to prevent overfitting
-early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+# Increased early stopping patience
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 
 # Learning rate scheduler
 def scheduler(epoch, lr):
@@ -205,7 +214,7 @@ callbacks = [early_stopping, lr_scheduler]
 # %%
 history_galformer = galformer_model.fit(
     train_dataset,
-    epochs=50,
+    epochs=100,  # Increased epochs
     validation_data=test_dataset,
     callbacks=callbacks,
     verbose=1
@@ -235,17 +244,20 @@ print(f"Enhanced Galformer Model - Test Loss: {test_loss_galformer:.4f}, Test MA
 # ## Predict on Test Data
 
 # %%
-# Collect features and labels from test_dataset
+# Collect features, labels, and label info from test_dataset
 X_test_list = []
 y_test_list = []
+label_info_list = []
 
-for features, labels in test_dataset:
+for features, (labels, label_info) in test_dataset:
     X_test_list.append(features.numpy())
     y_test_list.append(labels.numpy())
+    label_info_list.append(label_info.numpy())
 
 # Concatenate lists to form arrays
 X_test = np.concatenate(X_test_list, axis=0)
 y_test = np.concatenate(y_test_list, axis=0)
+label_info = np.concatenate(label_info_list, axis=0)  # Shape: (num_samples, 2)
 
 # Predict on test data
 def add_positional_encoding(inputs):
@@ -257,17 +269,18 @@ def add_positional_encoding(inputs):
 X_test_with_pe = add_positional_encoding(X_test)
 y_pred_galformer = galformer_model.predict(X_test_with_pe)
 
-# Denormalize predictions if necessary (assuming labels were not normalized)
-# If labels were normalized, apply the inverse transformation here
+# Denormalize predictions and actual labels
+y_pred_galformer_denorm = y_pred_galformer * label_info[:, 1:2] + label_info[:, 0:1]
+y_test_denorm = y_test * label_info[:, 1:2] + label_info[:, 0:1]
 
 # Visualize predictions for the first test sample
 plt.figure(figsize=(10, 6))
 
 # Plot Actual Prices for the first test sample
-plt.plot(range(1, output_length + 1), y_test[0], label="Actual Prices", marker='o')
+plt.plot(range(1, output_length + 1), y_test_denorm[0], label="Actual Prices", marker='o')
 
 # Plot Predicted Prices for the first test sample (Galformer)
-plt.plot(range(1, output_length + 1), y_pred_galformer[0], label="Predicted Prices (Galformer)", marker='x')
+plt.plot(range(1, output_length + 1), y_pred_galformer_denorm[0], label="Predicted Prices (Galformer)", marker='x')
 
 plt.title("Actual vs Predicted Prices (First Test Sample - Enhanced Galformer)")
 plt.xlabel("Days Ahead")
@@ -329,7 +342,7 @@ def prepare_inference_data(company_df, sequence_length=60):
         input_sequence = (input_sequence - feature_mean) / feature_std
         # Ensure the input sequence has the correct shape
         input_sequence = np.expand_dims(input_sequence, axis=0)  # Add batch dimension
-        return input_sequence.astype(np.float32)  # Ensure data type consistency
+        return input_sequence.astype(np.float32), feature_mean, feature_std  # Return mean and std for future use
     else:
         raise ValueError("Insufficient data for inference (less than sequence length).")
 
@@ -350,7 +363,7 @@ def get_galformer_predictions_for_company(company_df, galformer_model, sequence_
     """
     try:
         # Prepare data for inference
-        input_data = prepare_inference_data(company_df, sequence_length=sequence_length)
+        input_data, _, _ = prepare_inference_data(company_df, sequence_length=sequence_length)
 
         # Add positional encoding to inference data
         pe = positional_encoding(input_data.shape[1], input_data.shape[2])
@@ -359,6 +372,10 @@ def get_galformer_predictions_for_company(company_df, galformer_model, sequence_
 
         # Make predictions with Galformer
         pred_galformer = galformer_model.predict(input_data_with_pe)
+        # Since labels were normalized during training, you might need to apply inverse transformation here
+        # However, during inference, we don't have label_mean and label_std, so predictions will be in standardized form
+        # You may need to collect actual label_mean and label_std from training data and apply inverse transformation
+        # For now, we will return the standardized predictions
         return pred_galformer.flatten()
     except ValueError as e:
         print(f"Skipping due to error: {e}")
@@ -407,7 +424,7 @@ def predictions_to_dataframe(predictions_dict):
             records.append({
                 'Company': company_key.replace('df_', ''),
                 'Day_Ahead': day_ahead,
-                'Predicted_Price': value
+                'Predicted_Price_Standardized': value  # Note that this is in standardized form
             })
     return pd.DataFrame(records)
 
