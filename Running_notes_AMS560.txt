@@ -15,3 +15,5 @@ Federal Reserve Economic Data (FRED): fredapi
 		db61e0d65c4d2a1053221aec21822d4e
 		
 
+https://colab.research.google.com/drive/1qq4Yal5RoCnXTsYvTXUut7GJGH4Z_w0A#scrollTo=V5-wTYD78UBp
+
