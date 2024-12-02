@@ -10,13 +10,17 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+from sklearn.preprocessing import MinMaxScaler
 import random
 import re
 import time
 import urllib.parse
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
+import aiohttp
 
-from transformers import pipeline, AutoTokenizer
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
 import feedparser
 
 # Suppress warnings
@@ -94,8 +98,6 @@ def fetch_historical_data(ticker, start_date, end_date):
         st.warning(f"No historical data available for {ticker}.")
     return data
 
-from sklearn.preprocessing import MinMaxScaler
-
 # Prepare input sequence function
 def prepare_input_sequence(data, sequence_length, ticker):
     if 'Close' not in data.columns or len(data) < sequence_length:
@@ -152,7 +154,8 @@ def summarize_articles(articles, summarizer, summarizer_tokenizer):
             current_chunk += ' ' + sentence
             current_length += sentence_length
         else:
-            chunks.append(current_chunk.strip())
+            if current_chunk:
+                chunks.append(current_chunk.strip())
             current_chunk = sentence
             current_length = sentence_length
 
@@ -162,19 +165,23 @@ def summarize_articles(articles, summarizer, summarizer_tokenizer):
 
     summaries = []
 
-    for chunk in chunks:
-        try:
-            summary = summarizer(
-                chunk,
-                max_length=200,
-                min_length=100,
-                do_sample=False
-            )[0]['summary_text']
-            summaries.append(summary)
-        except Exception as e:
-            st.error(f"Error summarizing articles: {e}")
-            logging.error(f"Error summarizing articles for chunk: {e}")
-            continue
+    # Process all chunks in batch
+    try:
+        batch_size = 8  # Adjust batch size as needed
+        for i in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[i:i+batch_size]
+            batch_summaries = summarizer(
+                batch_chunks,
+                max_length=100,
+                min_length=30,
+                do_sample=False,
+                truncation=True
+            )
+            summaries.extend([summary['summary_text'] for summary in batch_summaries])
+    except Exception as e:
+        st.error(f"Error summarizing articles: {e}")
+        logging.error(f"Error summarizing articles: {e}")
+        return 'No summary available.'
 
     combined_summary = ' '.join(summaries)
     return combined_summary if combined_summary else 'No summary available.'
@@ -204,6 +211,10 @@ def analyze_sentiment_summary(summary_text, sentiment_classifier):
 # Analyze article sentiments function
 def analyze_article_sentiments(articles, sentiment_classifier):
     sentiment_data = []
+
+    texts = []
+    dates = []
+
     for article in articles:
         text = f"{article.get('title', '')}. {article.get('summary', '')}."
         if not text.strip():
@@ -217,8 +228,16 @@ def analyze_article_sentiments(articles, sentiment_classifier):
         except Exception as e:
             logging.error(f"Error parsing date for article: {e}")
             continue
-        try:
-            result = sentiment_classifier(text[:512])[0]
+
+        texts.append(text[:512])
+        dates.append(date)
+
+    if not texts:
+        return pd.DataFrame()
+
+    try:
+        batch_results = sentiment_classifier(texts)
+        for result, date in zip(batch_results, dates):
             label = result['label'].lower()
             if label == 'positive':
                 score = result['score']
@@ -227,9 +246,11 @@ def analyze_article_sentiments(articles, sentiment_classifier):
             else:
                 score = 0  # Neutral sentiment
             sentiment_data.append({'Date': date, 'Sentiment Score': score})
-        except Exception as e:
-            logging.error(f"Error analyzing sentiment for an article: {e}")
-            continue
+    except Exception as e:
+        logging.error(f"Error analyzing sentiment for articles: {e}")
+        st.error(f"Error analyzing sentiment for articles: {e}")
+        return pd.DataFrame()
+
     sentiment_df = pd.DataFrame(sentiment_data)
     if sentiment_df.empty:
         st.warning("No sentiment data available to analyze.")
@@ -242,22 +263,22 @@ def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score,
     prompt = (
         f"As a seasoned financial analyst, provide a detailed analysis for {ticker} based on the following data:\n"
         f"- Current Price: ${current_price:.2f}\n"
-        f"- Predicted Prices for the next {prediction_horizon} days: {predicted_prices.tolist()}\n"
+        f"- Predicted Prices for the next {prediction_horizon} days: {predicted_prices}\n"
         f"- Sentiment Score based on recent news: {sentiment_score:.2f}\n\n"
         f"Please include market trends, potential risks, and an investment recommendation. Explain your reasoning thoroughly."
     )
     try:
         generated = text_generator(
             prompt,
-            max_length=400,
+            max_length=200,
             num_return_sequences=1,
             no_repeat_ngram_size=2,
             do_sample=True,
             top_k=50,
             top_p=0.95,
-            temperature=0.7
+            temperature=0.7,
         )[0]['generated_text']
-        reasoning = generated[len(prompt):].strip()
+        reasoning = generated.strip()
         # Ensure the reasoning ends gracefully
         if reasoning and reasoning[-1] not in ['.', '!', '?']:
             reasoning += '.'
@@ -267,38 +288,56 @@ def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score,
         logging.error(f"Error generating reasoning for {ticker}: {e}")
         return "Unable to generate reasoning at this time."
 
-# Fetch Google News RSS function
-def fetch_google_news_rss(ticker, max_articles, ticker_to_company_name):
+# Asynchronous function to fetch RSS feed
+async def fetch_rss_feed(session, feed_url):
+    async with session.get(feed_url) as response:
+        return await response.text()
+
+# Fetch Google News RSS function (asynchronous)
+async def fetch_google_news_rss_async(ticker, max_articles, ticker_to_company_name):
     company_name = ticker_to_company_name.get(ticker, ticker)  # Use ticker if company name not found
     query = f"{company_name} stock"
     encoded_query = urllib.parse.quote_plus(query)
     feed_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
 
     try:
-        feed = feedparser.parse(feed_url)
-        if not feed.entries:
-            st.warning(f"No articles found for {company_name}.")
-            return []
-        articles = []
-        for entry in feed.entries[:max_articles]:
-            title = entry.title
-            # Clean HTML tags from the summary
-            summary = re.sub('<[^<]+?>', '', entry.summary)
-            published_at = entry.published
-            articles.append({
-                'title': title,
-                'summary': summary,
-                'published_date': published_at
-            })
-        return articles
+        async with aiohttp.ClientSession() as session:
+            rss_text = await fetch_rss_feed(session, feed_url)
+            feed = feedparser.parse(rss_text)
+            if not feed.entries:
+                logging.warning(f"No articles found for {company_name}.")
+                return []
+            articles = []
+            for entry in feed.entries[:max_articles]:
+                title = entry.title
+                # Clean HTML tags from the summary
+                summary = re.sub('<[^<]+?>', '', entry.summary)
+                published_at = entry.published
+                articles.append({
+                    'title': title,
+                    'summary': summary,
+                    'published_date': published_at
+                })
+            return articles
     except Exception as e:
-        st.error(f"Error fetching news for {company_name}: {e}")
         logging.error(f"Error fetching news for {company_name}: {e}")
         return []
 
+# Function to fetch news for multiple tickers asynchronously
+async def fetch_news_for_tickers(tickers, max_articles):
+    tasks = []
+    for ticker in tickers:
+        tasks.append(fetch_google_news_rss_async(ticker, max_articles, ticker_to_company_name))
+    results = await asyncio.gather(*tasks)
+    return {tickers[i]: results[i] for i in range(len(tickers))}
+
+# Synchronous wrapper for asynchronous function
+def fetch_news(tickers, max_articles):
+    return asyncio.run(fetch_news_for_tickers(tickers, max_articles))
+
 # Plot predictions function
 def plot_predictions(ticker, current_price, lstm_pred, galformer_pred):
-    # Fetch historical data for the past 90 days
+    # Same as before
     end_date = datetime.today()
     start_date = end_date - timedelta(days=90)
     historical_data = fetch_historical_data(ticker, start_date, end_date)
@@ -368,6 +407,7 @@ def plot_predictions(ticker, current_price, lstm_pred, galformer_pred):
 
 # Plot sentiment function
 def plot_sentiment(sentiment_score, key):
+    # Same as before
     fig = go.Figure(
         go.Indicator(
             mode="gauge+number",
@@ -383,6 +423,7 @@ def plot_sentiment(sentiment_score, key):
 
 # Display results in tabs function
 def display_results_in_tabs(company):
+    # Same as before
     st.subheader(f"{company['Ticker']} - ${company['Current Price']:.2f}")
     st.metric(label="Sentiment Score", value=round(company['Sentiment Score'], 2))
 
@@ -483,14 +524,39 @@ def display_results_in_tabs(company):
 
 @st.cache_resource
 def load_models():
-    sentiment_model_name = "ProsusAI/finbert"  # Corrected model name
-    summarizer_model_name = 'facebook/bart-large-cnn'
-    generator_model_name = 'gpt2-medium'
+    sentiment_model_name = "ProsusAI/finbert"
+    summarizer_model_name = 'sshleifer/distilbart-cnn-12-6'  # Smaller, faster model
+    generator_model_name = 'distilgpt2'  # Smaller, faster model
 
-    sentiment_classifier = pipeline('sentiment-analysis', model=sentiment_model_name)
-    summarizer = pipeline('summarization', model=summarizer_model_name)
+    # Load sentiment classifier
+    sentiment_classifier = pipeline('sentiment-analysis', model=sentiment_model_name, framework='pt')
+
+    # Load summarizer
+    summarizer = pipeline('summarization', model=summarizer_model_name, tokenizer=summarizer_model_name, framework='pt')
     summarizer_tokenizer = AutoTokenizer.from_pretrained(summarizer_model_name)
-    text_generator = pipeline('text-generation', model=generator_model_name, pad_token_id=50256)
+
+    # Load text generator
+    text_generator_tokenizer = AutoTokenizer.from_pretrained(generator_model_name)
+    text_generator_model = AutoModelForCausalLM.from_pretrained(generator_model_name)
+
+    # Explicitly set eos_token_id and pad_token_id
+    eos_token_id = text_generator_tokenizer.eos_token_id
+    if eos_token_id is None:
+        eos_token_id = text_generator_tokenizer.pad_token_id  # Use pad_token_id if eos_token_id is None
+    if eos_token_id is None:
+        eos_token_id = text_generator_tokenizer.sep_token_id  # Use sep_token_id if pad_token_id is None
+
+    # Set the model configurations
+    text_generator_model.config.eos_token_id = eos_token_id
+    text_generator_model.config.pad_token_id = eos_token_id
+
+    # Initialize text generator pipeline
+    text_generator = pipeline(
+        'text-generation',
+        model=text_generator_model,
+        tokenizer=text_generator_tokenizer,
+        framework='pt',
+    )
 
     return sentiment_classifier, summarizer, summarizer_tokenizer, text_generator
 
@@ -531,6 +597,69 @@ def fetch_current_prices(tickers):
             current_prices[ticker] = np.nan  # Use NaN for missing data
     return current_prices
 
+# Function to process each ticker (for parallel processing)
+def process_ticker(ticker, current_price, articles, max_articles, sequence_length, prediction_horizon, sentiment_classifier, summarizer, summarizer_tokenizer, text_generator, galformer_model):
+    logging.info(f"Processing ticker {ticker}")
+    company_info = {}
+    try:
+        if np.isnan(current_price):
+            st.warning(f"Skipping {ticker} due to missing current price.")
+            logging.warning(f"Skipping {ticker} due to missing current price.")
+            return None
+
+        # Get Galformer predictions
+        galformer_pred = galformer_predictions(ticker, sequence_length, galformer_model)
+        if galformer_pred is None:
+            st.warning(f"Skipping {ticker} due to insufficient data for Galformer predictions.")
+            logging.warning(f"Skipping {ticker} due to insufficient data for Galformer predictions.")
+            return None
+        galformer_pred = np.round(galformer_pred, 2)
+
+        # Mock LSTM predictions (replace with actual LSTM predictions if available)
+        lstm_pred = np.round(
+            np.random.normal(
+                loc=current_price, scale=current_price * 0.02, size=prediction_horizon
+            ),
+            2,
+        )
+
+        # Use the pre-fetched articles
+        if not articles:
+            st.warning(f"No news articles found for {ticker}.")
+            logging.warning(f"No news articles found for {ticker}.")
+            return None
+        summary = summarize_articles(articles, summarizer, summarizer_tokenizer)
+
+        # Perform sentiment analysis on summary
+        sentiment = analyze_sentiment_summary(summary, sentiment_classifier)
+
+        # Analyze sentiment over time
+        daily_sentiment = analyze_article_sentiments(articles, sentiment_classifier)
+
+        # Generate reasoning
+        reasoning = generate_reasoning(
+            ticker, current_price, galformer_pred.tolist(), sentiment, text_generator
+        )
+
+        # Assemble company information
+        company_info = {
+            'Ticker': ticker,
+            'Current Price': current_price,
+            'LSTM Prediction': lstm_pred.tolist(),
+            'Galformer Prediction': galformer_pred.tolist(),
+            'Sentiment Score': sentiment,
+            'Summary': summary,
+            'Reasoning': reasoning,
+            'Daily Sentiment': daily_sentiment,
+        }
+
+        logging.info(f"Processed {ticker}")
+        return company_info
+    except Exception as e:
+        logging.error(f"Error processing {ticker}: {e}")
+        st.error(f"Error processing {ticker}: {e}")
+        return None
+
 # Application Layout
 st.title("Stock Analysis Dashboard")
 
@@ -560,78 +689,47 @@ if st.sidebar.button("Run Analysis"):
     with st.spinner("Fetching current stock prices..."):
         current_prices = fetch_current_prices(selected_tickers)
 
+    with st.spinner("Fetching news articles..."):
+        news_data = fetch_news(selected_tickers, max_articles)
+
     combined_data = []
+
     total_tickers = len(selected_tickers)
     progress_bar = st.progress(0)
 
-    for i, ticker in enumerate(selected_tickers):
-        logging.info(f"Processing ticker {ticker} ({i+1}/{total_tickers})")
-        current_price = current_prices.get(ticker, np.nan)
-        if np.isnan(current_price):
-            st.warning(f"Skipping {ticker} due to missing current price.")
-            logging.warning(f"Skipping {ticker} due to missing current price.")
-            continue
-
-        # Get Galformer predictions
-        with st.spinner(f"Generating Galformer predictions for {ticker}..."):
-            galformer_pred = galformer_predictions(ticker, sequence_length, galformer_model)
-            if galformer_pred is None:
-                st.warning(f"Skipping {ticker} due to insufficient data for Galformer predictions.")
-                logging.warning(f"Skipping {ticker} due to insufficient data for Galformer predictions.")
-                continue
-            galformer_pred = np.round(galformer_pred, 2)
-
-        # Mock LSTM predictions (replace with actual LSTM predictions if available)
-        lstm_pred = np.round(
-            np.random.normal(
-                loc=current_price, scale=current_price * 0.02, size=prediction_horizon
-            ),
-            2,
-        )
-
-        # Fetch and summarize news articles
-        with st.spinner(f"Fetching and summarizing news for {ticker}..."):
-            articles = fetch_google_news_rss(ticker, max_articles=max_articles, ticker_to_company_name=ticker_to_company_name)
-            if not articles:
-                st.warning(f"No news articles found for {ticker}.")
-                logging.warning(f"No news articles found for {ticker}.")
-                continue
-            summary = summarize_articles(articles, summarizer, summarizer_tokenizer)
-
-        # Perform sentiment analysis on summary
-        with st.spinner(f"Analyzing sentiment for {ticker}..."):
-            sentiment = analyze_sentiment_summary(summary, sentiment_classifier)
-
-        # Analyze sentiment over time
-        with st.spinner(f"Analyzing sentiment over time for {ticker}..."):
-            daily_sentiment = analyze_article_sentiments(articles, sentiment_classifier)
-
-        # Generate reasoning
-        with st.spinner(f"Generating reasoning for {ticker}..."):
-            reasoning = generate_reasoning(
-                ticker, current_price, galformer_pred, sentiment, text_generator
-            )
-
-        # Assemble company information
-        company_info = {
-            'Ticker': ticker,
-            'Current Price': current_price,
-            'LSTM Prediction': lstm_pred.tolist(),
-            'Galformer Prediction': galformer_pred.tolist(),
-            'Sentiment Score': sentiment,
-            'Summary': summary,
-            'Reasoning': reasoning,
-            'Daily Sentiment': daily_sentiment,
+    # Prepare thread pool executor
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        # Submit tasks
+        futures = {
+            executor.submit(
+                process_ticker,
+                ticker,
+                current_prices.get(ticker, np.nan),
+                news_data.get(ticker, []),
+                max_articles,
+                sequence_length,
+                prediction_horizon,
+                sentiment_classifier,
+                summarizer,
+                summarizer_tokenizer,
+                text_generator,
+                galformer_model
+            ): ticker for ticker in selected_tickers
         }
 
-        combined_data.append(company_info)
-
-        st.success(f"Processed {ticker}")
-        logging.info(f"Processed {ticker}")
-        progress_bar.progress((i + 1) / total_tickers)
-
-        # Add a delay to be polite to servers
-        time.sleep(1)
+        for i, future in enumerate(as_completed(futures)):
+            ticker = futures[future]
+            try:
+                company_info = future.result()
+                if company_info:
+                    combined_data.append(company_info)
+                    st.success(f"Processed {ticker}")
+                else:
+                    st.warning(f"Ticker {ticker} was skipped.")
+            except Exception as e:
+                st.error(f"Error processing {ticker}: {e}")
+                logging.error(f"Error processing {ticker}: {e}")
+            progress_bar.progress((i + 1) / total_tickers)
 
     # Display results
     st.header("Analysis Results")
