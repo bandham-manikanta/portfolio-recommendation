@@ -175,7 +175,7 @@ def summarize_articles(articles, summarizer, summarizer_tokenizer):
                 max_length=100,
                 min_length=30,
                 do_sample=False,
-                truncation=True
+                truncation=True  # Explicitly enable truncation
             )
             summaries.extend([summary['summary_text'] for summary in batch_summaries])
     except Exception as e:
@@ -277,6 +277,7 @@ def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score,
             top_k=50,
             top_p=0.95,
             temperature=0.7,
+            truncation=True  # Explicitly enable truncation
         )[0]['generated_text']
         reasoning = generated.strip()
         # Ensure the reasoning ends gracefully
@@ -542,9 +543,11 @@ def load_models():
     # Explicitly set eos_token_id and pad_token_id
     eos_token_id = text_generator_tokenizer.eos_token_id
     if eos_token_id is None:
-        eos_token_id = text_generator_tokenizer.pad_token_id  # Use pad_token_id if eos_token_id is None
+        eos_token_id = text_generator_tokenizer.pad_token_id
     if eos_token_id is None:
-        eos_token_id = text_generator_tokenizer.sep_token_id  # Use sep_token_id if pad_token_id is None
+        eos_token_id = text_generator_tokenizer.sep_token_id
+    if eos_token_id is None:
+        eos_token_id = 50256  # Default for GPT-2 models
 
     # Set the model configurations
     text_generator_model.config.eos_token_id = eos_token_id
@@ -556,13 +559,14 @@ def load_models():
         model=text_generator_model,
         tokenizer=text_generator_tokenizer,
         framework='pt',
+        pad_token_id=eos_token_id
     )
 
     return sentiment_classifier, summarizer, summarizer_tokenizer, text_generator
 
 @st.cache_resource
 def load_galformer_model():
-    model_path = 'generalized_stock_galformer_model.keras'
+    model_path = 'enhanced_stock_galformer_model.keras'
     if not os.path.exists(model_path):
         st.error(
             f"Galformer model file not found at '{model_path}'. Please ensure the model file is available."

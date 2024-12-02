@@ -26,8 +26,8 @@ import os
 
 # %%
 sequence_length = 60  # Should match the value used in data preparation
-prediction_horizon = 5
-epochs = 10
+prediction_horizon = 25
+epochs = 1
 batch_size = 512  # Increased batch size
 print('Batch size:', batch_size)
 
@@ -87,12 +87,12 @@ def parse_tfrecord_fn(example_proto):
     feature = (feature - feature_mean) / feature_std
 
     # Normalize labels (z-score standardization)
-    label_mean = tf.reduce_mean(label, keepdims=True)
-    label_std = tf.math.reduce_std(label, keepdims=True) + 1e-6
+    label_mean = tf.reduce_mean(label)
+    label_std = tf.math.reduce_std(label) + 1e-6
     label = (label - label_mean) / label_std
 
     # Store label mean and std for inverse transformation (if needed)
-    label_info = tf.stack([label_mean, label_std], axis=0)
+    label_info = tf.stack([label_mean, label_std])  # Shape: (2,)
 
     return feature, (label, label_info)
 
@@ -232,7 +232,8 @@ plt.title('Enhanced Galformer Model Loss')
 plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
-plt.show()
+plt.savefig('train_validation_loss.png')
+plt.close()  # Close the plot to free memory
 
 # %% [markdown]
 # ## Evaluate the Enhanced Galformer Model
@@ -271,8 +272,16 @@ X_test_with_pe = add_positional_encoding(X_test)
 y_pred_galformer = galformer_model.predict(X_test_with_pe)
 
 # Denormalize predictions and actual labels
-y_pred_galformer_denorm = y_pred_galformer * label_info[:, 1:2] + label_info[:, 0:1]
-y_test_denorm = y_test * label_info[:, 1:2] + label_info[:, 0:1]
+label_mean = label_info[:, 0]  # Shape: (num_samples,)
+label_std = label_info[:, 1]   # Shape: (num_samples,)
+
+# Reshape label_mean and label_std to (num_samples, 1) to match the predictions
+label_mean = label_mean.reshape(-1, 1)
+label_std = label_std.reshape(-1, 1)
+
+# Denormalize predictions and actual labels
+y_pred_galformer_denorm = y_pred_galformer * label_std + label_mean
+y_test_denorm = y_test * label_std + label_mean
 
 # Visualize predictions for the first test sample
 plt.figure(figsize=(10, 6))
@@ -287,7 +296,8 @@ plt.title("Actual vs Predicted Prices (First Test Sample - Enhanced Galformer)")
 plt.xlabel("Days Ahead")
 plt.ylabel("Price")
 plt.legend()
-plt.show()
+plt.savefig('actual_vs_predicted_prices.png')  # Save the plot
+plt.close()  # Close the plot to free memory
 
 # %% [markdown]
 # ## Save the Enhanced Galformer Model
@@ -373,10 +383,10 @@ def get_galformer_predictions_for_company(company_df, galformer_model, sequence_
 
         # Make predictions with Galformer
         pred_galformer = galformer_model.predict(input_data_with_pe)
-        # Since labels were normalized during training, you might need to apply inverse transformation here
-        # However, during inference, we don't have label_mean and label_std, so predictions will be in standardized form
-        # You may need to collect actual label_mean and label_std from training data and apply inverse transformation
-        # For now, we will return the standardized predictions
+        # Since labels were normalized during training per sample, and during inference we don't have label mean and std,
+        # these predictions are in standardized form and cannot be directly denormalized.
+        # If you have global label_mean and label_std from training data, use them here to denormalize.
+        # For now, we will return the standardized predictions.
         return pred_galformer.flatten()
     except ValueError as e:
         print(f"Skipping due to error: {e}")
