@@ -38,6 +38,55 @@ st.set_page_config(page_title="Stock Analysis Dashboard", layout="wide")
 prediction_horizon = 5  # Number of days ahead to predict
 sequence_length = 60    # Sequence length expected by the Galformer model
 
+# Ticker to company name mapping
+ticker_to_company_name = {
+    "AAPL": "Apple Inc.",
+    "NVDA": "NVIDIA Corporation",
+    "MSFT": "Microsoft Corporation",
+    "GOOGL": "Alphabet Inc.",
+    "AMZN": "Amazon.com Inc.",
+    "META": "Meta Platforms Inc.",
+    "TSLA": "Tesla Inc.",
+    "WMT": "Walmart Inc.",
+    "JPM": "JPMorgan Chase & Co.",
+    "V": "Visa Inc.",
+    "XOM": "Exxon Mobil Corporation",
+    "UNH": "UnitedHealth Group Incorporated",
+    "ORCL": "Oracle Corporation",
+    "MA": "Mastercard Incorporated",
+    "HD": "The Home Depot Inc.",
+    "PG": "The Procter & Gamble Company",
+    "COST": "Costco Wholesale Corporation",
+    "JNJ": "Johnson & Johnson",
+    "NFLX": "Netflix Inc.",
+    "ABBV": "AbbVie Inc.",
+    "BAC": "Bank of America Corporation",
+    "KO": "The Coca-Cola Company",
+    "CRM": "Salesforce Inc.",
+    "CVX": "Chevron Corporation",
+    "MRK": "Merck & Co. Inc.",
+    "AMD": "Advanced Micro Devices Inc.",
+    "PEP": "PepsiCo Inc.",
+    "ACN": "Accenture plc",
+    "LIN": "Linde plc",
+    "MCD": "McDonald's Corporation",
+    "CSCO": "Cisco Systems Inc.",
+    "ADBE": "Adobe Inc.",
+    "WFC": "Wells Fargo & Company",
+    "IBM": "International Business Machines Corporation",
+    "GE": "General Electric Company",
+    "ABT": "Abbott Laboratories",
+    "DHR": "Danaher Corporation",
+    "AXP": "American Express Company",
+    "MS": "Morgan Stanley",
+    "CAT": "Caterpillar Inc.",
+    "NOW": "ServiceNow Inc.",
+    "QCOM": "QUALCOMM Incorporated",
+    "PM": "Philip Morris International Inc.",
+    "ISRG": "Intuitive Surgical Inc.",
+    "VZ": "Verizon Communications Inc.",
+}
+
 # Fetch historical data function
 def fetch_historical_data(ticker, start_date, end_date):
     data = yf.download(ticker, start=start_date, end=end_date, progress=False)
@@ -219,15 +268,16 @@ def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score,
         return "Unable to generate reasoning at this time."
 
 # Fetch Google News RSS function
-def fetch_google_news_rss(ticker, max_articles):
-    query = f"{ticker} stock"
+def fetch_google_news_rss(ticker, max_articles, ticker_to_company_name):
+    company_name = ticker_to_company_name.get(ticker, ticker)  # Use ticker if company name not found
+    query = f"{company_name} stock"
     encoded_query = urllib.parse.quote_plus(query)
     feed_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
 
     try:
         feed = feedparser.parse(feed_url)
         if not feed.entries:
-            st.warning(f"No articles found for {ticker}.")
+            st.warning(f"No articles found for {company_name}.")
             return []
         articles = []
         for entry in feed.entries[:max_articles]:
@@ -242,8 +292,8 @@ def fetch_google_news_rss(ticker, max_articles):
             })
         return articles
     except Exception as e:
-        st.error(f"Error fetching news for {ticker}: {e}")
-        logging.error(f"Error fetching news for {ticker}: {e}")
+        st.error(f"Error fetching news for {company_name}: {e}")
+        logging.error(f"Error fetching news for {company_name}: {e}")
         return []
 
 # Plot predictions function
@@ -488,53 +538,7 @@ st.title("Stock Analysis Dashboard")
 st.sidebar.header("Configure Analysis")
 
 # Ticker selection
-all_tickers = [
-    "AAPL",
-    "NVDA",
-    "MSFT",
-    "GOOGL",
-    "AMZN",
-    "META",
-    "TSLA",
-    "WMT",
-    "JPM",
-    "V",
-    "XOM",
-    "UNH",
-    "ORCL",
-    "MA",
-    "HD",
-    "PG",
-    "COST",
-    "JNJ",
-    "NFLX",
-    "ABBV",
-    "BAC",
-    "KO",
-    "CRM",
-    "CVX",
-    "MRK",
-    "AMD",
-    "PEP",
-    "ACN",
-    "LIN",
-    "MCD",
-    "CSCO",
-    "ADBE",
-    "WFC",
-    "IBM",
-    "GE",
-    "ABT",
-    "DHR",
-    "AXP",
-    "MS",
-    "CAT",
-    "NOW",
-    "QCOM",
-    "PM",
-    "ISRG",
-    "VZ",
-]
+all_tickers = list(ticker_to_company_name.keys())
 
 selected_tickers = st.sidebar.multiselect(
     "Select Tickers", options=all_tickers, default=["AAPL", "GOOGL", "MSFT", "VZ"]
@@ -587,7 +591,7 @@ if st.sidebar.button("Run Analysis"):
 
         # Fetch and summarize news articles
         with st.spinner(f"Fetching and summarizing news for {ticker}..."):
-            articles = fetch_google_news_rss(ticker, max_articles=max_articles)
+            articles = fetch_google_news_rss(ticker, max_articles=max_articles, ticker_to_company_name=ticker_to_company_name)
             if not articles:
                 st.warning(f"No news articles found for {ticker}.")
                 logging.warning(f"No news articles found for {ticker}.")
