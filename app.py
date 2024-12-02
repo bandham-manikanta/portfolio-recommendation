@@ -18,9 +18,6 @@ import logging
 
 from transformers import pipeline, AutoTokenizer
 import feedparser
-import nltk
-nltk.download('punkt')
-from nltk.tokenize import sent_tokenize
 
 # Suppress warnings
 import warnings
@@ -90,7 +87,8 @@ def summarize_articles(articles, summarizer, summarizer_tokenizer):
     if not full_text:
         return 'No summary available.'
 
-    sentences = sent_tokenize(full_text)
+    # Use regex to split sentences
+    sentences = re.split(r'(?<=[.!?])\s+', full_text)
 
     max_input_length = summarizer_tokenizer.model_max_length
 
@@ -435,7 +433,7 @@ def display_results_in_tabs(company):
 
 @st.cache_resource
 def load_models():
-    sentiment_model_name = "ProsusAI/finbert"
+    sentiment_model_name = "ProsusAI/finbert"  # Corrected model name
     summarizer_model_name = 'facebook/bart-large-cnn'
     generator_model_name = 'gpt2-medium'
 
