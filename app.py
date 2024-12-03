@@ -17,6 +17,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
 import aiohttp
+import requests
+import json
 
 
 from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
@@ -279,12 +281,15 @@ def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score,
         f"- Current Price: ${current_price:.2f}\n"
         f"- Predicted Prices for the next {prediction_horizon} days: {predicted_prices}\n"
         f"- Sentiment Score based on recent news: {sentiment_score:.2f}\n\n"
-        f"Please include market trends, potential risks, and an investment recommendation. Explain your reasoning thoroughly."
+        f"Please include market trends, potential risks, and an investment recommendation. Explain your reasoning thoroughly. Dont add in any references"
+        f"and keep the ouput as plain text and your answer must cover : what the forecast says, what to do buy/sell/hold, what can we expect in the future"
+        f"See to it that you maintain the same font type for everything be it numbers or regular text"
     )
     try:
-        generated = text_generator(
+        
+        """generated = text_generator(
             prompt,
-            max_length=400,
+            max_length=1000,
             num_return_sequences=1,
             no_repeat_ngram_size=2,
             do_sample=True,
@@ -293,7 +298,46 @@ def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score,
             temperature=0.7,
             truncation=True  # Explicitly enable truncation
         )[0]['generated_text']
-        reasoning = generated.strip()
+        reasoning = generated.strip()"""
+
+        """generator = pipeline('text-generation', model='gpt-2')
+        analysis = generator(prompt, max_length=500, num_return_sequences=1)
+        reasoning = analysis.strip()"""
+
+        url = "https://api.perplexity.ai/chat/completions"
+
+        payload = {
+            "model": "llama-3.1-sonar-small-128k-online",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Be precise and concise."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "search_domain_filter": ["perplexity.ai"],
+            "return_images": False,
+            "return_related_questions": False,
+            "search_recency_filter": "month",
+            "top_k": 0,
+            "stream": False,
+            "presence_penalty": 0,
+            "frequency_penalty": 1
+        }
+        headers = {
+            "Authorization": "Bearer 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",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.request("POST", url, json=payload, headers=headers)
+        json_text = json.loads(response.text)['choices'][0]['message']['content']      
+        reasoning = json_text.strip()
+
         # Ensure the reasoning ends gracefully
         if reasoning and reasoning[-1] not in ['.', '!', '?']:
             reasoning += '.'
