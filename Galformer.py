@@ -27,7 +27,7 @@ import os
 # %%
 sequence_length = 60  # Should match the value used in data preparation
 prediction_horizon = 25
-epochs = 15
+epochs = 100
 batch_size = 512  # Increased batch size
 print('Batch size:', batch_size)
 
