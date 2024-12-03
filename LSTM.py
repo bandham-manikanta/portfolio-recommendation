@@ -22,7 +22,7 @@ import yfinance as yf
 sequence_length = 60     # Sequence length matching the data preparation
 prediction_horizon = 25  # Matching Galformer prediction horizon
 batch_size = 512         # Matching Galformer batch size
-epochs = 15              # Number of training epochs matching Galformer
+epochs = 1              # Number of training epochs matching Galformer
 print('Batch size:', batch_size)
 
 # %% [markdown]
