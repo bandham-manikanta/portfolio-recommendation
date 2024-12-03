@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
 import aiohttp
 
+
 from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
 import feedparser
 
@@ -162,10 +163,8 @@ def lstm_predictions(ticker, sequence_length, model):
 
 # Summarize articles function
 def summarize_articles(articles, summarizer, summarizer_tokenizer):
-    full_text = ' '.join(
-        f"{article.get('title', '')}. {article.get('summary', '')}."
-        for article in articles
-    ).strip()
+    
+    full_text = articles[0]
 
     if not full_text:
         return 'No summary available.'
@@ -248,24 +247,7 @@ def analyze_article_sentiments(articles, sentiment_classifier):
     dates = []
 
     for article in articles:
-        text = f"{article.get('title', '')}. {article.get('summary', '')}."
-        if not text.strip():
-            continue
-        date_str = article.get('published_date', '')
-        if not date_str:
-            continue
-        # Convert date string to date object
-        try:
-            date = pd.to_datetime(date_str).date()
-        except Exception as e:
-            logging.error(f"Error parsing date for article: {e}")
-            continue
-
-        texts.append(text[:512])
-        dates.append(date)
-
-    if not texts:
-        return pd.DataFrame()
+        texts = article + ""
 
     try:
         batch_results = sentiment_classifier(texts)
@@ -291,7 +273,7 @@ def analyze_article_sentiments(articles, sentiment_classifier):
     return daily_sentiment
 
 # Generate reasoning function
-def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score, text_generator): # Akhil: Improve this
+def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score, text_generator):
     prompt = (
         f"As a seasoned financial analyst, provide a detailed analysis for {ticker} based on the following data:\n"
         f"- Current Price: ${current_price:.2f}\n"
@@ -302,7 +284,7 @@ def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score,
     try:
         generated = text_generator(
             prompt,
-            max_length=200,
+            max_length=400,
             num_return_sequences=1,
             no_repeat_ngram_size=2,
             do_sample=True,
@@ -327,40 +309,36 @@ async def fetch_rss_feed(session, feed_url):
         return await response.text()
 
 # Fetch Google News RSS function (asynchronous)
-async def fetch_google_news_rss_async(ticker, max_articles, ticker_to_company_name):
-    company_name = ticker_to_company_name.get(ticker, ticker)  # Use ticker if company name not found
-    query = f"{company_name} stock"
-    encoded_query = urllib.parse.quote_plus(query)
-    feed_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            rss_text = await fetch_rss_feed(session, feed_url)
-            feed = feedparser.parse(rss_text)
-            if not feed.entries:
-                logging.warning(f"No articles found for {company_name}.")
-                return []
-            articles = []
-            for entry in feed.entries[:max_articles]:
-                title = entry.title
-                # Clean HTML tags from the summary
-                summary = re.sub('<[^<]+?>', '', entry.summary)
-                published_at = entry.published
-                articles.append({
-                    'title': title,
-                    'summary': summary,
-                    'published_date': published_at
-                })
-            return articles
-    except Exception as e:
-        logging.error(f"Error fetching news for {company_name}: {e}")
+
+async def fetch_google_news_rss_async(ticker, max_articles):
+    import requests
+    url = "https://api.newscatcherapi.com/v2/search"
+    comp_name = ticker_to_company_name[ticker]
+    querystring = {"q":{comp_name},"lang":"en","sort_by":"relevancy","page":"1"}
+    headers = {
+        "x-api-key": "EEXiyyXLkDjFm6cnTNj4QxvXnpduY9xXn9E26IUYtOg"
+    }
+    response = requests.request("GET", url, headers=headers, params=querystring)
+    data = response.json()
+    
+    if data.get("status") == "ok" and "articles" in data:
+        # Extract only the summaries
+        summaries = []
+        for article in data["articles"][:max_articles]:  # Limit to max_articles if needed
+            summaries.append(article.get("summary"))
+        
+        return summaries
+    else:
+        print(f"Failed to fetch articles or no articles found for {comp_name}.")
         return []
+
 
 # Function to fetch news for multiple tickers asynchronously
 async def fetch_news_for_tickers(tickers, max_articles):
     tasks = []
     for ticker in tickers:
-        tasks.append(fetch_google_news_rss_async(ticker, max_articles, ticker_to_company_name))
+        tasks.append(fetch_google_news_rss_async(ticker, max_articles))
     results = await asyncio.gather(*tasks)
     return {tickers[i]: results[i] for i in range(len(tickers))}
 
@@ -378,6 +356,7 @@ def plot_predictions(ticker, current_price, lstm_pred, galformer_pred):
         return
     historical_prices = historical_data['Close'].reset_index()
     historical_prices.rename(columns={'Date': 'Date', 'Close': 'Price'}, inplace=True)
+    historical_prices.rename(columns={historical_prices.columns[1]: 'Price'}, inplace=True)
     historical_prices['Type'] = 'Historical'
 
     # Ensure 'Date' is datetime.datetime
@@ -440,6 +419,12 @@ def plot_predictions(ticker, current_price, lstm_pred, galformer_pred):
         yaxis_title='Price',
         legend_title_text='Data Type'
     )
+    
+    combined_prices_df = {'Date': future_dates,
+        'LSTM Predictions': df_lstm['Price'],
+        'Transformer Predictions': df_galformer['Price']}
+    
+    st.dataframe(combined_prices_df)
 
     st.plotly_chart(fig, use_container_width=True, key=f"predictions-{ticker}")
 
@@ -472,7 +457,7 @@ def display_results_in_tabs(company):
                 company['Ticker'],
                 company['Current Price'],
                 company['LSTM Prediction'],
-                company['Galformer Prediction'],
+                company['Galformer Prediction']
             )
         else:
             st.write("Predictions are not available.")
@@ -699,6 +684,7 @@ def process_ticker(ticker, current_price, articles, max_articles, sequence_lengt
             sentiment = analyze_sentiment_summary(summary, sentiment_classifier)
             # Analyze sentiment over time
             daily_sentiment = analyze_article_sentiments(articles, sentiment_classifier)
+
 
         # Generate reasoning
         reasoning = generate_reasoning(

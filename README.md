@@ -4,7 +4,7 @@
 
 You aim to develop a comprehensive system that:
 
-- Predicts stock prices for the next 5 days for the top 50 S&P 500 companies using both the **Galformer transformer model** and an **LSTM model**.
+- Predicts stock prices for the next 25 days for the top 50 S&P 500 companies using both the **Galformer transformer model** and an **LSTM model**.
 - Incorporates **economic indicators** and other features into the dataset.
 - Performs **sentiment analysis** of news articles for each company.
 - Summarizes news articles to provide context.
