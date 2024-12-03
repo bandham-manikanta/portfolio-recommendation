@@ -146,17 +146,18 @@ def lstm_predictions(ticker, sequence_length, model):
     input_sequence = prepare_input_sequence(data, sequence_length, ticker)
     if input_sequence is not None:
         try:
-            predictions = model.predict(input_sequence)
-            # Denormalize predictions
-            mean = np.mean(data['Close'].values[-prediction_horizon:])
-            std = np.std(data['Close'].values[-prediction_horizon:]) + 1e-6
-            predictions = predictions * std + mean
-            return predictions.flatten()[:prediction_horizon]
+            # Mock predictions: Use the last known closing price and add random noise
+            last_close_price = data['Close'].values[-1]
+            # Generate mock predictions with random fluctuations
+            predictions = last_close_price + np.random.normal(0, last_close_price * 0.01, prediction_horizon)
+            return predictions
         except Exception as e:
-            st.error(f"Error making LSTM predictions for {ticker}: {e}")
-            logging.error(f"Error making LSTM predictions for {ticker}: {e}")
+            st.error(f"Error making mock LSTM predictions for {ticker}: {e}")
+            logging.error(f"Error making mock LSTM predictions for {ticker}: {e}")
             return None
     else:
+        st.warning(f"Insufficient data to create input sequence for {ticker}.")
+        logging.warning(f"Insufficient data to create input sequence for {ticker}.")
         return None
 
 # Summarize articles function
@@ -290,7 +291,7 @@ def analyze_article_sentiments(articles, sentiment_classifier):
     return daily_sentiment
 
 # Generate reasoning function
-def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score, text_generator):
+def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score, text_generator): # Akhil: Improve this
     prompt = (
         f"As a seasoned financial analyst, provide a detailed analysis for {ticker} based on the following data:\n"
         f"- Current Price: ${current_price:.2f}\n"
@@ -656,7 +657,9 @@ def fetch_current_prices(tickers):
     return current_prices
 
 # Function to process each ticker (updated to use LSTM model)
-def process_ticker(ticker, current_price, articles, max_articles, sequence_length, prediction_horizon, sentiment_classifier, summarizer, summarizer_tokenizer, text_generator, galformer_model, lstm_model):
+# Adjusted process_ticker function to handle cases where LSTM predictions might be None
+def process_ticker(ticker, current_price, articles, max_articles, sequence_length, prediction_horizon,
+                   sentiment_classifier, summarizer, summarizer_tokenizer, text_generator, galformer_model, lstm_model):
     logging.info(f"Processing ticker {ticker}")
     company_info = {}
     try:
@@ -673,26 +676,29 @@ def process_ticker(ticker, current_price, articles, max_articles, sequence_lengt
             return None
         galformer_pred = np.round(galformer_pred, 2)
 
-        # Get LSTM predictions
+        # Get LSTM predictions (mocked)
         lstm_pred = lstm_predictions(ticker, sequence_length, lstm_model)
         if lstm_pred is None:
-            st.warning(f"Skipping {ticker} due to insufficient data for LSTM predictions.")
-            logging.warning(f"Skipping {ticker} due to insufficient data for LSTM predictions.")
-            return None
-        lstm_pred = np.round(lstm_pred, 2)
+            st.warning(f"LSTM predictions unavailable for {ticker}, using Galformer predictions as a fallback.")
+            logging.warning(f"LSTM predictions unavailable for {ticker}, using Galformer predictions as a fallback.")
+            lstm_pred = galformer_pred  # Use Galformer predictions as a fallback
+        else:
+            lstm_pred = np.round(lstm_pred, 2)
 
         # Use the pre-fetched articles
         if not articles:
             st.warning(f"No news articles found for {ticker}.")
             logging.warning(f"No news articles found for {ticker}.")
-            return None
-        summary = summarize_articles(articles, summarizer, summarizer_tokenizer)
-
-        # Perform sentiment analysis on summary
-        sentiment = analyze_sentiment_summary(summary, sentiment_classifier)
-
-        # Analyze sentiment over time
-        daily_sentiment = analyze_article_sentiments(articles, sentiment_classifier)
+            summary = 'No summary available.'
+            sentiment = 0.0
+            daily_sentiment = pd.DataFrame()
+        else:
+            # Summarize articles
+            summary = summarize_articles(articles, summarizer, summarizer_tokenizer)
+            # Perform sentiment analysis on summary
+            sentiment = analyze_sentiment_summary(summary, sentiment_classifier)
+            # Analyze sentiment over time
+            daily_sentiment = analyze_article_sentiments(articles, sentiment_classifier)
 
         # Generate reasoning
         reasoning = generate_reasoning(
@@ -717,7 +723,7 @@ def process_ticker(ticker, current_price, articles, max_articles, sequence_lengt
         logging.error(f"Error processing {ticker}: {e}")
         st.error(f"Error processing {ticker}: {e}")
         return None
-
+    
 # Application Layout
 st.title("Stock Analysis Dashboard")
 
