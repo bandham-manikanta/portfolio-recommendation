@@ -338,6 +338,8 @@ def generate_reasoning(ticker, current_price, predicted_prices, sentiment_score,
         json_text = json.loads(response.text)['choices'][0]['message']['content']      
         reasoning = json_text.strip()
 
+        reasoning = reasoning.encode('utf-8').decode('utf-8')
+
         # Ensure the reasoning ends gracefully
         if reasoning and reasoning[-1] not in ['.', '!', '?']:
             reasoning += '.'
@@ -490,9 +492,11 @@ def plot_sentiment(sentiment_score, key):
 # Display results in tabs function
 def display_results_in_tabs(company):
     st.subheader(f"{company['Ticker']} - ${company['Current Price']:.2f}")
-    st.metric(label="Sentiment Score", value=round(company['Sentiment Score'], 2))
+    #st.metric(label="Sentiment Score", value=round(company['Sentiment Score'], 2))
+    st.markdown("#### Sentiment Score")
+    st.metric(label="", value=round(company['Sentiment Score'], 2))
 
-    tabs = st.tabs(["Predictions", "Sentiment & News", "Reasoning", "Sentiment Over Time"])
+    tabs = st.tabs(["Predictions", "Sentiment Score", "Reasoning"])
 
     with tabs[0]:
         st.markdown("#### Predictions")
@@ -515,9 +519,9 @@ def display_results_in_tabs(company):
 
     with tabs[2]:
         st.markdown("#### Generated Reasoning")
-        st.write(company['Reasoning'])
+        st.markdown(company['Reasoning'])
 
-    with tabs[3]:
+    """with tabs[3]:
         st.markdown("#### Sentiment Over Time")
         daily_sentiment = company.get('Daily Sentiment')
         if daily_sentiment is not None and not daily_sentiment.empty:
@@ -585,7 +589,7 @@ def display_results_in_tabs(company):
 
             st.plotly_chart(fig, use_container_width=True, key=f"stock-price-{company['Ticker']}")
         else:
-            st.write("No sentiment data available for this company.")
+            st.write("No sentiment data available for this company.")"""
 
 @st.cache_resource
 def load_models():
