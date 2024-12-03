@@ -522,3 +522,8 @@ By following this updated plan, you'll develop a system that:
 By incorporating economic indicators and adding an LSTM model for comparison, you're enhancing both the depth and breadth of your analysis. This approach allows for a more comprehensive understanding of stock price movements and provides valuable insights to users through your Streamlit app.
 
 Feel free to adjust or expand upon any of these steps to suit your specific needs. If you have any questions or need further assistance with any part of this plan, don't hesitate to ask!
+
+
+Fetching news using 
+
+https://www.newscatcherapi.com/
