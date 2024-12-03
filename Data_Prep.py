@@ -1,30 +1,21 @@
-# %% [markdown]
-# ### Import Libraries
-
-# %%
-import tensorflow as tf  # For TFRecords
-from fredapi import Fred
+# Import necessary libraries
 import pandas as pd
+from fredapi import Fred
 import numpy as np
-import glob
 import holidays
 import pandas_ta as ta
-import math
 import os
+
+# Set display options for pandas
 pd.set_option("display.max_columns", None)
 pd.set_option("display.max_rows", 100)
-tf.config.threading.set_inter_op_parallelism_threads(8)  # Setting threads as per your system
 
-# %% [markdown]
-# ### Initialize FRED API
-
-# %%
 # Initialize Fred with your API key
-fred = Fred(api_key='db61e0d65c4d2a1053221aec21822d4e')  # Replace with your actual API key securely
+fred = Fred(api_key='YOUR_FRED_API_KEY')  # Replace with your actual API key securely
 
 # Define date range
 start_date = '2002-01-01'
-end_date = '2024-11-28'
+end_date = pd.Timestamp.today().strftime('%Y-%m-%d')  # Use today's date
 
 # Define the indicators and their series IDs
 indicators = {
@@ -43,33 +34,22 @@ indicators = {
     'Total Business Inventories': 'BUSINV'
 }
 
-# Fetch the data with date range
+# Fetch the economic data within the specified date range
 economic_data = pd.DataFrame()
-
 for name, series_id in indicators.items():
     try:
-        data = fred.get_series(
-            series_id,
-            observation_start=start_date,
-            observation_end=end_date
-        )
+        data = fred.get_series(series_id, observation_start=start_date, observation_end=end_date)
         if data is not None and not data.empty:
             economic_data[name] = data
             print(f"Successfully fetched data for {name}")
     except Exception as e:
         print(f"Error fetching {name}: {e}")
 
-# Convert index to datetime if not already
+# Convert index to datetime and sort
 economic_data.index = pd.to_datetime(economic_data.index)
-
-# Ensure the DataFrame is sorted by date
 economic_data.sort_index(inplace=True)
 
-# %% [markdown]
-# ### Fill Missing Values in Economic Data
-
-# %%
-# Fill missing values
+# Function to fill missing values in economic data
 def fill_missing_values(df):
     df_filled = df.copy()
 
@@ -78,7 +58,7 @@ def fill_missing_values(df):
         df_filled.index = pd.to_datetime(df_filled.index)
     df_filled.sort_index(inplace=True)
 
-    # Create Month and Year columns once
+    # Create Month and Year columns
     df_filled['Month'] = df_filled.index.month
     df_filled['Year'] = df_filled.index.year
 
@@ -119,15 +99,9 @@ economic_data_filled = fill_missing_values(economic_data)
 economic_data_filled.index = pd.to_datetime(economic_data_filled.index)
 economic_data_filled.sort_index(inplace=True)
 
-# %% [markdown]
-# ### Read and Preprocess Stock Data
-
-# %%
-# Read stock data
-stock_data = pd.read_parquet('sp500_50stocks_data.parquet')
-# Convert index to DatetimeIndex if not already
+# Read stock data from a Parquet file
+stock_data = pd.read_parquet('sp500_50stocks_data.parquet')  # Ensure this file exists in your directory
 stock_data.index = pd.to_datetime(stock_data.index)
-# Sort by date
 stock_data.sort_index(inplace=True)
 
 # Flatten MultiIndex columns in stock_data
@@ -138,24 +112,18 @@ economic_data_filled.index.name = 'Date'
 stock_data.index.name = 'Date'
 
 # Create a daily date range based on stock data index
-daily_date_range = pd.date_range(
-    start=stock_data.index.min(),
-    end=stock_data.index.max(),
-    freq='D'  # Daily frequency
-)
+daily_date_range = pd.date_range(start=stock_data.index.min(), end=stock_data.index.max(), freq='D')
 
 # Reindex economic data to daily frequency using forward fill
-economic_data_daily = economic_data_filled.reindex(daily_date_range, method='ffill')
+economic_data_daily = economic_data_filled.reindex(daily_date_range)
 economic_data_daily.index.name = 'Date'
+economic_data_daily.fillna(method='ffill', inplace=True)
 
 # Merge the DataFrames using the date index
 combined_data = stock_data.join(economic_data_daily, how='left')
-combined_data.ffill(inplace=True)
+combined_data.fillna(method='ffill', inplace=True)
 
-# %% [markdown]
-# ### Additional Feature Engineering
-
-# %%
+# List of tickers to process
 tickers = ["AAPL", "NVDA", "MSFT", "GOOG", "GOOGL", "AMZN", "META", "AVGO", "LLY", "TSLA",
            "WMT", "JPM", "V", "XOM", "UNH", "ORCL", "MA", "HD", "PG", "COST", "JNJ",
            "NFLX", "ABBV", "BAC", "KO", "CRM", "CVX", "MRK", "TMUS", "AMD", "PEP",
@@ -164,6 +132,7 @@ tickers = ["AAPL", "NVDA", "MSFT", "GOOG", "GOOGL", "AMZN", "META", "AVGO", "LLY
 
 print("Initial number of columns:", len(combined_data.columns))
 
+# Calculate technical indicators for each ticker
 for ticker in tickers:
     close_col = f'{ticker}_Close'
 
@@ -173,22 +142,23 @@ for ticker in tickers:
         combined_data[f'{ticker}_RSI_14'] = ta.rsi(combined_data[close_col], length=14)
         macd = ta.macd(combined_data[close_col], fast=12, slow=26)
         macd_columns = [f'{ticker}_MACD', f'{ticker}_MACD_Hist', f'{ticker}_MACD_Signal']
-        macd.columns = macd_columns
-        combined_data = pd.concat([combined_data, macd], axis=1)
+        if macd is not None and not macd.empty:
+            macd.columns = macd_columns
+            combined_data = pd.concat([combined_data, macd], axis=1)
         bbands = ta.bbands(combined_data[close_col], length=20)
-        bbands_columns = [f'{ticker}_BB_Lower', f'{ticker}_BB_Middle', f'{ticker}_BB_Upper', f'{ticker}_BB_Bandwidth', f'{ticker}_BB_Percentage']
-        bbands.columns = bbands_columns
-        combined_data = pd.concat([combined_data, bbands], axis=1)
+        bbands_columns = [
+            f'{ticker}_BB_Lower', f'{ticker}_BB_Middle', f'{ticker}_BB_Upper',
+            f'{ticker}_BB_Bandwidth', f'{ticker}_BB_Percentage'
+        ]
+        if bbands is not None and not bbands.empty:
+            bbands.columns = bbands_columns
+            combined_data = pd.concat([combined_data, bbands], axis=1)
         combined_data[f'{ticker}_MOM_10'] = ta.mom(combined_data[close_col], length=10)
     else:
         print(f'Column {close_col} not found in combined_data.')
 
 print("Number of columns after adding technical indicators:", len(combined_data.columns))
 
-# %% [markdown]
-# ### Create Lag Features
-
-# %%
 # Create lag features
 n_lags = 5
 lagged_features = {}
@@ -224,37 +194,20 @@ combined_data = combined_data.copy()
 
 print(f"Total number of columns after adding lag features: {len(combined_data.columns)}")
 
-# %% [markdown]
-# ### Extract Date-Based Features
-
-# %%
 # Extract Date-Based Features
-# Extract day of the week
 combined_data['Day_of_Week'] = combined_data.index.dayofweek  # Monday=0, Sunday=6
-
-# Extract month
 combined_data['Month'] = combined_data.index.month
-
-# Extract quarter
 combined_data['Quarter'] = combined_data.index.quarter
-
-# Identify US holidays
 us_holidays = holidays.US()
 combined_data['Is_Holiday'] = combined_data.index.isin(us_holidays).astype(int)
-
-# Identify month start and end
 combined_data['Is_Month_Start'] = combined_data.index.is_month_start.astype(int)
 combined_data['Is_Month_End'] = combined_data.index.is_month_end.astype(int)
 
-# %% [markdown]
-# ### Split Combined Data into Individual Company DataFrames
-
-# %%
 # Split combined data into individual company DataFrames
 all_dfs = {}  # Dictionary to store DataFrames
 
 for tick in tickers:
-    # Create a dynamic DataFrame name
+    # Create a DataFrame for each company
     df_name = "df_" + tick
 
     # Filter the combined_data DataFrame for columns matching the ticker
@@ -277,7 +230,12 @@ for tick in tickers:
     # Store the DataFrame in the dictionary
     all_dfs[df_name] = company_df
 
-# Adjust DataFrames for specific companies if necessary (as in your original code)
+    # Save company DataFrame to CSV
+    csv_filename = f'{df_name}.csv'
+    company_df.to_csv(csv_filename)
+    print(f"Saved {df_name} to {csv_filename}")
+
+# Adjust DataFrames for specific companies if necessary
 filtered_list = ['Day_of_Week', 'Month', 'Quarter', 'Is_Holiday', 'Is_Month_Start', 'Is_Month_End'] + economic_indicators
 
 # Adjust DataFrames for specific companies
@@ -287,116 +245,22 @@ for comp in special_companies:
     all_dfs[comp] = all_dfs[comp].loc[:, all_dfs[comp].columns.str.startswith(f'{ticker}_') | all_dfs[comp].columns.isin(filtered_list)]
     print(f"{comp} shape after adjustment: {all_dfs[comp].shape}")
 
-# %% [markdown]
-# ### Prepare Data for Models and Serialize Using TFRecords
+    # Save adjusted DataFrame to CSV
+    csv_filename = f'{comp}_adjusted.csv'
+    all_dfs[comp].to_csv(csv_filename)
+    print(f"Saved adjusted {comp} to {csv_filename}")
 
-# %%
-# Function to prepare data sequences
-def prepare_sequence_data(df, sequence_length=60, prediction_horizon=5):
-    X, y = [], []
+# Save column names to a text file
+column_names_filename = 'combined_data_columns.txt'
 
-    # Ensure the DataFrame is sorted by date
-    df = df.sort_index()
+with open(column_names_filename, 'w') as f:
+    # Write the column names
+    for column in combined_data.columns:
+        f.write(f"{column}\n")
 
-    # Select relevant input features (exclude targets)
-    input_features = df.filter(regex="^(?!.*target).*").values
-    targets = df.filter(regex="target").values
+print(f"Column names saved to {column_names_filename}")
 
-    # Create sequences
-    for i in range(len(df) - sequence_length - prediction_horizon + 1):
-        seq_x = input_features[i : i + sequence_length]
-        seq_y = targets[i + sequence_length : i + sequence_length + prediction_horizon]
-        X.append(seq_x)
-        y.append(seq_y.flatten())
-
-    return np.array(X), np.array(y)
-
-# Prepare data for all companies
-sequence_length = 60  # Length of input sequences
-prediction_horizon = 5  # Number of days to predict
-
-X_list, y_list = [], []
-for company, df in all_dfs.items():
-    print(f"Preparing data for {company}...")
-    X_company, y_company = prepare_sequence_data(df, sequence_length, prediction_horizon)
-    X_list.append(X_company)
-    y_list.append(y_company)
-
-# Concatenate data from all companies
-X = np.concatenate(X_list, axis=0)
-y = np.concatenate(y_list, axis=0)
-
-print(f"Final shape of X: {X.shape}")
-print(f"Final shape of y: {y.shape}")
-
-# %% [markdown]
-# #### **Convert Data to float32**
-
-# %%
-# Convert X and y to float32
-X = X.astype(np.float32)
-y = y.astype(np.float32)
-
-print(f"Data types after conversion: X - {X.dtype}, y - {y.dtype}")
-
-# %% [markdown]
-# ### Save the Preprocessed Data into TFRecord Files
-
-# %%
-
-# Define the number of shards (TFRecord files)
-num_shards = 10  # You can adjust this number based on your needs
-
-# Calculate the number of samples per shard
-num_samples = X.shape[0]
-shard_size = math.ceil(num_samples / num_shards)
-
-# Create a directory to store TFRecord files
-tfrecord_dir = 'tfrecords_data'
-os.makedirs(tfrecord_dir, exist_ok=True)
-
-# Function to serialize features and labels
-def _bytes_feature(value):
-    """Returns a bytes_list from a string/byte."""
-    if isinstance(value, type(tf.constant(0))):  # if value is a tensor
-        value = value.numpy()  # get the numpy value
-    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
-
-def serialize_example(feature, label):
-    """
-    Creates a tf.train.Example message ready to be written to a file.
-    """
-    # Ensure feature and label are in float32
-    feature = feature.astype(np.float32)
-    label = label.astype(np.float32)
-
-    # Serialize the feature and label tensors
-    feature_serialized = tf.io.serialize_tensor(feature)
-    label_serialized = tf.io.serialize_tensor(label)
-
-    # Create a dictionary mapping the feature name to the tf.train.Example-compatible data type
-    feature_dict = {
-        'feature': _bytes_feature(feature_serialized.numpy()),
-        'label': _bytes_feature(label_serialized.numpy()),
-    }
-
-    # Create a Features message using tf.train.Example
-    example_proto = tf.train.Example(features=tf.train.Features(feature=feature_dict))
-    return example_proto.SerializeToString()
-
-# Write data to TFRecord files
-for shard_id in range(num_shards):
-    start_idx = shard_id * shard_size
-    end_idx = min(start_idx + shard_size, num_samples)
-
-    shard_X = X[start_idx:end_idx]
-    shard_y = y[start_idx:end_idx]
-
-    tfrecord_filename = os.path.join(tfrecord_dir, f'shard_{shard_id}.tfrecord')
-    with tf.io.TFRecordWriter(tfrecord_filename, options='GZIP') as writer:
-        for i in range(shard_X.shape[0]):
-            example = serialize_example(shard_X[i], shard_y[i])
-            writer.write(example)
-    print(f"TFRecord shard {shard_id} written with {end_idx - start_idx} samples.")
-
-print("All TFRecord files have been written.")
+# Optional: Concatenate all company DataFrames and save to CSV
+all_data_combined = pd.concat(all_dfs.values(), axis=0)
+all_data_combined.to_csv('all_companies_data.csv')
+print("All companies' data saved to 'all_companies_data.csv'")

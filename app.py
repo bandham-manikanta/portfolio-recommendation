@@ -768,7 +768,7 @@ st.sidebar.header("Configure Analysis")
 all_tickers = list(ticker_to_company_name.keys())
 
 selected_tickers = st.sidebar.multiselect(
-    "Select Tickers", options=all_tickers, default=["AAPL", "GOOGL", "MSFT", "VZ"]
+    "Select Tickers", options=all_tickers, default=["AAPL"]
 )
 
 # Number of articles
