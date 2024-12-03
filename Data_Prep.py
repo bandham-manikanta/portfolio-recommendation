@@ -20,7 +20,7 @@ tf.config.threading.set_inter_op_parallelism_threads(8)  # Setting threads as pe
 
 # %%
 # Initialize Fred with your API key
-fred = Fred(api_key='your_fred_api_key')  # Replace with your actual API key securely
+fred = Fred(api_key='db61e0d65c4d2a1053221aec21822d4e')  # Replace with your actual API key securely
 
 # Define date range
 start_date = '2002-01-01'
