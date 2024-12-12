@@ -19,7 +19,7 @@ import asyncio
 import aiohttp
 import requests
 import json
-from lstm_data_prep import lstm_predictions as lstm_predictions_prep
+from lstm_model_predictions_vals import lstm_predictions_vals
 
 
 from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
@@ -144,8 +144,10 @@ def galformer_predictions(ticker, sequence_length, model):
 
 # LSTM predictions function (similar to Galformer)
 def lstm_predictions(ticker, sequence_length, model):
-    predictions = lstm_predictions_prep()
+    predictions = lstm_predictions_vals(ticker)
+    print("*" * 25)
     predictions = predictions["df_"+ticker.upper()]
+    print("*" * 25)
     return predictions
 
 # Summarize articles function
