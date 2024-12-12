@@ -19,6 +19,7 @@ import asyncio
 import aiohttp
 import requests
 import json
+from lstm_data_prep import lstm_predictions as lstm_predictions_prep
 
 
 from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
@@ -143,25 +144,9 @@ def galformer_predictions(ticker, sequence_length, model):
 
 # LSTM predictions function (similar to Galformer)
 def lstm_predictions(ticker, sequence_length, model):
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=365)
-    data = fetch_historical_data(ticker, start_date, end_date)
-    input_sequence = prepare_input_sequence(data, sequence_length, ticker)
-    if input_sequence is not None:
-        try:
-            # Mock predictions: Use the last known closing price and add random noise
-            last_close_price = data['Close'].values[-1]
-            # Generate mock predictions with random fluctuations
-            predictions = last_close_price + np.random.normal(0, last_close_price * 0.01, prediction_horizon)
-            return predictions
-        except Exception as e:
-            st.error(f"Error making mock LSTM predictions for {ticker}: {e}")
-            logging.error(f"Error making mock LSTM predictions for {ticker}: {e}")
-            return None
-    else:
-        st.warning(f"Insufficient data to create input sequence for {ticker}.")
-        logging.warning(f"Insufficient data to create input sequence for {ticker}.")
-        return None
+    predictions = lstm_predictions_prep()
+    predictions = predictions["df_"+ticker.upper()]
+    return predictions
 
 # Summarize articles function
 def summarize_articles(articles, summarizer, summarizer_tokenizer):
@@ -521,75 +506,75 @@ def display_results_in_tabs(company):
         st.markdown("#### Generated Reasoning")
         st.markdown(company['Reasoning'])
 
-    """with tabs[3]:
-        st.markdown("#### Sentiment Over Time")
-        daily_sentiment = company.get('Daily Sentiment')
-        if daily_sentiment is not None and not daily_sentiment.empty:
-            # Plot sentiment over time
-            fig = px.line(daily_sentiment, x='Date', y='Sentiment Score',
-                          title='Sentiment Over Time', markers=True)
-            st.plotly_chart(fig, use_container_width=True, key=f"sentiment-over-time-{company['Ticker']}")
+    # """with tabs[3]:
+    #     st.markdown("#### Sentiment Over Time")
+    #     daily_sentiment = company.get('Daily Sentiment')
+    #     if daily_sentiment is not None and not daily_sentiment.empty:
+    #         # Plot sentiment over time
+    #         fig = px.line(daily_sentiment, x='Date', y='Sentiment Score',
+    #                       title='Sentiment Over Time', markers=True)
+    #         st.plotly_chart(fig, use_container_width=True, key=f"sentiment-over-time-{company['Ticker']}")
 
-            # Fetch historical stock prices matching sentiment dates
-            start_date = daily_sentiment['Date'].min()
-            end_date = daily_sentiment['Date'].max() + timedelta(days=1)  # Include the last day
-            historical_data = fetch_historical_data(company['Ticker'], start_date, end_date)
-            if historical_data.empty:
-                st.warning(f"No historical data available for {company['Ticker']}.")
-                return
-            historical_prices = historical_data['Close'].reset_index()
-            historical_prices['Date'] = pd.to_datetime(historical_prices['Date']).dt.date
-            historical_prices.rename(columns={'Close': 'Price'}, inplace=True)
+    #         # Fetch historical stock prices matching sentiment dates
+    #         start_date = daily_sentiment['Date'].min()
+    #         end_date = daily_sentiment['Date'].max() + timedelta(days=1)  # Include the last day
+    #         historical_data = fetch_historical_data(company['Ticker'], start_date, end_date)
+    #         if historical_data.empty:
+    #             st.warning(f"No historical data available for {company['Ticker']}.")
+    #             return
+    #         historical_prices = historical_data['Close'].reset_index()
+    #         historical_prices['Date'] = pd.to_datetime(historical_prices['Date']).dt.date
+    #         historical_prices.rename(columns={'Close': 'Price'}, inplace=True)
 
-            # Merge sentiment and historical prices
-            merged_df = pd.merge(
-                daily_sentiment,
-                historical_prices,
-                on='Date',
-                how='inner'
-            )
+    #         # Merge sentiment and historical prices
+    #         merged_df = pd.merge(
+    #             daily_sentiment,
+    #             historical_prices,
+    #             on='Date',
+    #             how='inner'
+    #         )
 
-            if merged_df.empty:
-                st.write("No overlapping dates between sentiment data and stock prices.")
-                return
+    #         if merged_df.empty:
+    #             st.write("No overlapping dates between sentiment data and stock prices.")
+    #             return
 
-            # Create dual-axis plot
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
+    #         # Create dual-axis plot
+    #         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-            # Add sentiment trace
-            fig.add_trace(
-                go.Scatter(
-                    x=merged_df['Date'],
-                    y=merged_df['Sentiment Score'],
-                    name="Sentiment Score",
-                    mode='lines+markers'
-                ),
-                secondary_y=False,
-            )
+    #         # Add sentiment trace
+    #         fig.add_trace(
+    #             go.Scatter(
+    #                 x=merged_df['Date'],
+    #                 y=merged_df['Sentiment Score'],
+    #                 name="Sentiment Score",
+    #                 mode='lines+markers'
+    #             ),
+    #             secondary_y=False,
+    #         )
 
-            # Add price trace using 'Price' column
-            if 'Price' in merged_df.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=merged_df['Date'],
-                        y=merged_df['Price'],
-                        name="Stock Price",
-                        mode='lines+markers'
-                    ),
-                    secondary_y=True,
-                )
+    #         # Add price trace using 'Price' column
+    #         if 'Price' in merged_df.columns:
+    #             fig.add_trace(
+    #                 go.Scatter(
+    #                     x=merged_df['Date'],
+    #                     y=merged_df['Price'],
+    #                     name="Stock Price",
+    #                     mode='lines+markers'
+    #                 ),
+    #                 secondary_y=True,
+    #             )
 
-            # Update layout
-            fig.update_layout(
-                title_text="Sentiment Score and Stock Price Over Time"
-            )
-            fig.update_xaxes(title_text="Date")
-            fig.update_yaxes(title_text="Sentiment Score", secondary_y=False)
-            fig.update_yaxes(title_text="Stock Price", secondary_y=True)
+    #         # Update layout
+    #         fig.update_layout(
+    #             title_text="Sentiment Score and Stock Price Over Time"
+    #         )
+    #         fig.update_xaxes(title_text="Date")
+    #         fig.update_yaxes(title_text="Sentiment Score", secondary_y=False)
+    #         fig.update_yaxes(title_text="Stock Price", secondary_y=True)
 
-            st.plotly_chart(fig, use_container_width=True, key=f"stock-price-{company['Ticker']}")
-        else:
-            st.write("No sentiment data available for this company.")"""
+    #         st.plotly_chart(fig, use_container_width=True, key=f"stock-price-{company['Ticker']}")
+    #     else:
+    #         st.write("No sentiment data available for this company.")"""
 
 @st.cache_resource
 def load_models():
@@ -709,6 +694,8 @@ def process_ticker(ticker, current_price, articles, max_articles, sequence_lengt
             return None
         galformer_pred = np.round(galformer_pred, 2)
 
+        print('Galform preds: ', type(galformer_pred), len(galformer_pred), galformer_pred)
+
         # Get LSTM predictions (mocked)
         lstm_pred = lstm_predictions(ticker, sequence_length, lstm_model)
         if lstm_pred is None:
@@ -768,7 +755,7 @@ st.sidebar.header("Configure Analysis")
 all_tickers = list(ticker_to_company_name.keys())
 
 selected_tickers = st.sidebar.multiselect(
-    "Select Tickers", options=all_tickers, default=["AAPL", "GOOGL", "MSFT", "VZ"]
+    "Select Tickers", options=all_tickers, default=["TSLA"]
 )
 
 # Number of articles
